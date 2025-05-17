@@ -2167,119 +2167,10 @@ def main():
 
     if len(sys.argv) > 1:
         initial_command = " ".join(sys.argv[1:])
-        print(f"Executing initial command with LangGraph: {initial_command}")
+        print(f"\nExecuting initial command: {initial_command}")
         
-        # Verificar se é um pedido de commit semântico
-        if ("commit" in initial_command.lower() and 
-            ("message" in initial_command.lower() or 
-             "semantic" in initial_command.lower() or 
-             "based on" in initial_command.lower() or 
-             "based in" in initial_command.lower() or
-             "diff" in initial_command.lower())):
-            print("Detected semantic commit request - checking git status...")
-            try:
-                # Verificar se há mudanças não commitadas
-                status = git_status_command("")
-                if "modified:" in status or "Changes not staged for commit" in status:
-                    print("Unstaged changes detected - running diff analysis...")
-                    diff_summary = git_diff_summary_command("")
-                    print("Generating commit message based on diff...")
-                    # Extrair informações semânticas do diff
-                    commit_type = "feat"
-                    if "fix" in diff_summary.lower() or "bug" in diff_summary.lower():
-                        commit_type = "fix"
-                    if "docs" in diff_summary.lower() or "comment" in diff_summary.lower():
-                        commit_type = "docs"
-                    
-                    # Extrair nomes de arquivos
-                    files_pattern = re.findall(r"modified:\s+([^\n]+)", status)
-                    if files_pattern:
-                        files_context = ", ".join(file.strip() for file in files_pattern)
-                    else:
-                        files_context = "code"
-                        
-                    # Criar mensagem de commit
-                    commit_msg = f"{commit_type}: update {files_context} based on diff analysis"
-                    
-                    # Executar commit diretamente
-                    result = git_add_commit_command(commit_msg)
-                    print(f"Commit result: {result}")
-                    initial_state = AgentState(
-                        input=f"I've committed the changes with message: {commit_msg}. {result}", 
-                        agent_outcome=[], 
-                        chat_history=[], 
-                        next_action=None, 
-                        final_response=None, 
-                        error=False, 
-                        error_message=None,
-                        error_category=ErrorCategory.NONE,
-                        needs_clarification=False,
-                        clarification_question=None,
-                        suggested_corrections=[]
-                    )
-                else:
-                    print("No changes to commit.")
-                    initial_state = AgentState(
-                        input=f"There are no changes to commit in the working directory.", 
-                        agent_outcome=[], 
-                        chat_history=[], 
-                        next_action=None, 
-                        final_response=None, 
-                        error=False, 
-                        error_message=None,
-                        error_category=ErrorCategory.NONE,
-                        needs_clarification=False,
-                        clarification_question=None,
-                        suggested_corrections=[]
-                    )
-            except Exception as e:
-                print(f"Error handling semantic commit: {e}")
-                initial_state = AgentState(
-                    input=initial_command, 
-                    agent_outcome=[], 
-                    chat_history=[], 
-                    next_action=None, 
-                    final_response=None, 
-                    error=False, 
-                    error_message=None,
-                    error_category=ErrorCategory.NONE,
-                    needs_clarification=False,
-                    clarification_question=None,
-                    suggested_corrections=[]
-                )
-        else:
-            # Comando normal, não é um pedido de commit semântico
-            initial_state = AgentState(
-                input=initial_command, 
-                agent_outcome=[], 
-                chat_history=[], 
-                next_action=None, 
-                final_response=None, 
-                error=False, 
-                error_message=None,
-                error_category=ErrorCategory.NONE,
-                needs_clarification=False,
-                clarification_question=None,
-                suggested_corrections=[]
-            )
-            
-        try:
-            # Invocar o grafo LangGraph
-            final_state = app.invoke(initial_state)
-            print("\n--- LangGraph Final State ---")
-            # Acessar a resposta final ou a última mensagem do agent_outcome
-            if final_state.get("final_response"):
-                print(f"Assistant: {final_state["final_response"]}")
-            elif final_state.get("error"):
-                print(f"Assistant Error: {final_state.get('error_message', 'Unknown error')}")
-            else:
-                print("Assistant: (No final response, check agent_outcome for details)")
-            # print(f"Full final state: {final_state}") # Para depuração completa
-
-        except Exception as e:
-            print(f"LangGraph execution failed: {e}")
-            import traceback
-            traceback.print_exc()
+        # Verificar padrões de comandos simples e processá-los diretamente
+        handle_direct_operation(initial_command)
     else:
         print("\nWelcome to your macOS AI Terminal Assistant (LangGraph Edition)!")
         print("Type 'exit' or 'quit' to leave.")
@@ -2294,86 +2185,18 @@ def main():
                 if user_input.lower() in ["exit", "quit"]:
                     print("Exiting assistant...")
                     break
+                
                 if user_input:
-                    # Verificar se é um pedido de commit semântico
-                    if ("commit" in user_input.lower() and 
-                        ("message" in user_input.lower() or 
-                         "semantic" in user_input.lower() or 
-                         "based on" in user_input.lower() or 
-                         "based in" in user_input.lower() or
-                         "diff" in user_input.lower())):
-                        print("Detected semantic commit request - checking git status...")
-                        # Verificar se há mudanças não commitadas diretamente
-                        try:
-                            status = git_status_command("")
-                            if "modified:" in status or "Changes not staged for commit" in status:
-                                print("Unstaged changes detected - running diff analysis...")
-                                diff_summary = git_diff_summary_command("")
-                                print("Generating commit message based on diff...")
-                                
-                                # Extrair informações semânticas do diff
-                                commit_type = "feat"
-                                if "fix" in diff_summary.lower() or "bug" in diff_summary.lower():
-                                    commit_type = "fix"
-                                if "docs" in diff_summary.lower() or "comment" in diff_summary.lower():
-                                    commit_type = "docs"
-                                if "enum" in diff_summary.lower() or "error" in diff_summary.lower():
-                                    commit_type = "feat" if commit_type == "feat" else commit_type
-                                    scope = "error-handling"
-                                else:
-                                    scope = None
-                                
-                                # Extrair nomes de arquivos
-                                files_pattern = re.findall(r"modified:\s+([^\n]+)", status)
-                                if files_pattern:
-                                    files_context = ", ".join(file.strip() for file in files_pattern)
-                                else:
-                                    files_context = "code"
-                                    
-                                # Detectar funcionalidades específicas
-                                features_added = []
-                                class_match = re.search(r"\+class\s+(\w+)", diff_summary)
-                                if class_match:
-                                    features_added.append(f"classe {class_match.group(1)}")
-                                
-                                func_match = re.search(r"\+def\s+(\w+)", diff_summary)
-                                if func_match:
-                                    features_added.append(f"função {func_match.group(1)}")
-                                
-                                # Criar mensagem de commit
-                                commit_msg = f"{commit_type}"
-                                if scope:
-                                    commit_msg += f"({scope})"
-                                commit_msg += f": "
-                                
-                                if features_added:
-                                    commit_msg += f"adiciona {', '.join(features_added)} "
-                                    if files_context:
-                                        commit_msg += f"em {files_context}"
-                                else:
-                                    commit_msg += f"atualiza {files_context} baseado na análise do diff"
-                                
-                                # Executar commit diretamente
-                                print(f"Committing with message: '{commit_msg}'...")
-                                result = git_add_commit_command(commit_msg)
-                                print(f"Commit result: {result}")
-                                
-                                # Atualizar a entrada do usuário para incluir o resultado
-                                user_input = f"I've committed the changes with message: '{commit_msg}'. {result}"
-                            else:
-                                print("No changes to commit.")
-                                user_input = f"There are no changes to commit in the working directory."
-                        except Exception as e:
-                            print(f"Error handling semantic commit: {e}")
-                            # Mantém o input original para processamento normal
+                    # Verificar se é um comando direto que podemos processar sem o fluxo completo
+                    if handle_direct_operation(user_input):
+                        continue
                     
-                    current_state_input = AgentState(
+                    # Processamento normal com LangGraph para outras solicitações
+                    print("\nProcessando...")
+                    initial_state = AgentState(
                         input=user_input, 
-                        # agent_outcome precisa ser o scratchpad da última execução ou similar.
-                        # Por enquanto, vamos resetar o agent_outcome a cada turno no modo interativo,
-                        # mas o chat_history acumulará as mensagens Humanas e AI (se final_response for uma).
-                        agent_outcome=[], # Resetar scratchpad para este turno
-                        chat_history=list(current_chat_history), # Passar cópia do histórico acumulado
+                        agent_outcome=[], 
+                        chat_history=current_chat_history, 
                         next_action=None, 
                         final_response=None, 
                         error=False, 
@@ -2383,25 +2206,18 @@ def main():
                         clarification_question=None,
                         suggested_corrections=[]
                     )
-                    final_state = app.invoke(current_state_input)
                     
-                    print("\n--- LangGraph Turn Final State ---")
-                    final_response_text = None
+                    final_state = app.invoke(initial_state)
                     if final_state.get("final_response"):
-                        final_response_text = final_state["final_response"]
-                        print(f"Assistant: {final_response_text}")
-                        # Adicionar input do usuário e resposta da AI ao histórico
+                        print(f"Assistant: {final_state['final_response']}")
+                        
+                        # Atualizar histórico de chat
                         current_chat_history.append(HumanMessage(content=user_input))
-                        current_chat_history.append(AIMessage(content=final_response_text))
+                        current_chat_history.append(AIMessage(content=final_state["final_response"]))
                     elif final_state.get("error"):
-                        error_message_text = final_state.get('error_message', 'Unknown error')
-                        error_category = final_state.get('error_category', ErrorCategory.UNKNOWN)
-                        print(f"Assistant Error: {error_message_text} (Categoria: {error_category.name})")
-                        # Não adicionar ao histórico de chat bem-sucedido se houve erro crítico
+                        print(f"Error: {final_state.get('error_message', 'Unknown error')}")
                     else:
-                        print("Assistant: (No final response, graph might have ended unexpectedly or in error. Check logs.)")
-                    # print(f"Full final state for turn: {final_state}") # Para depuração completa
-
+                        print("No final response")
             except KeyboardInterrupt:
                 print("\nExiting assistant due to user interrupt...")
                 break
@@ -2409,91 +2225,138 @@ def main():
                 print(f"An error occurred in the interactive loop: {e}")
                 import traceback
                 traceback.print_exc()
-                # Considere se quer quebrar o loop ou continuar
 
-def start_interactive_agent():
-    """Starts the agent in interactive mode."""
-    global llm_model, agent_tools_list_global, agent_prefix_prompt_global, tool_executor_global, tool_calls_counter, total_tool_calls
+def handle_direct_operation(user_input: str) -> bool:
+    """Processa operações comuns diretamente sem passar pelo fluxo completo de LangGraph.
     
-    if llm_model is None:
-        print("LLM is not initialized. Please run main() first.")
-        return
+    Args:
+        user_input: A entrada do usuário
         
-    print("\nWelcome to your macOS AI Terminal Assistant (LangGraph Edition)!")
-    print("Type 'exit' or 'quit' to leave.")
-    current_chat_history = [] # Manter histórico para o loop interativo
+    Returns:
+        bool: True se a operação foi processada diretamente, False caso contrário
+    """
+    # Padrões para comandos diretos
+    commit_patterns = [
+        r"(?:faz|make|do|create|criar)?\s*(?:um|a)?\s*commit",
+        r"commit(?:ar)?\s+(?:as|the)?\s*(?:mudanças|alterações|changes)",
+        r"git\s+commit",
+        r"add\s+e\s+commit",
+        r"save\s+changes",
+        r"salv(?:ar|e)\s+(?:as)?\s*(?:mudanças|alterações)"
+    ]
     
-    while True:
-        try:
-            # Reset dos contadores a cada nova interação
-            tool_calls_counter = {}
-            total_tool_calls = 0
-            
-            user_input = input("(venv) macOS-AI-LG> ")
-            if user_input.lower() in ["exit", "quit"]:
-                print("Exiting assistant...")
-                break
+    push_patterns = [
+        r"(?:faz|make|do)?\s*(?:um|a)?\s*push",
+        r"push(?:ar)?\s+(?:as|the)?\s*(?:mudanças|alterações|changes)",
+        r"git\s+push",
+        r"enviar\s+para\s+o\s+(?:remoto|remote|origin|github|gitlab)"
+    ]
+    
+    status_patterns = [
+        r"(?:mostrar?|exibir?|ver|show|display)\s+(?:o)?\s*(?:status|estado)",
+        r"git\s+status",
+        r"(?:qual|what)(?:'s|\s+is|\s+é)?\s+(?:o)?\s*(?:status|estado)"
+    ]
+    
+    # Verificar se é um pedido de commit
+    if any(re.search(pattern, user_input.lower()) for pattern in commit_patterns):
+        if "message" in user_input.lower() or "semantic" in user_input.lower() or "baseado" in user_input.lower() or "based on" in user_input.lower() or "context" in user_input.lower():
+            # Commit semântico baseado no diff
+            print("Detecção direta: Pedido de commit semântico")
+            # Verificar se há mudanças não commitadas
+            status = git_status_command("")
+            if "modified:" in status or "Changes not staged for commit" in status:
+                # Gerar mensagem de commit semântica
+                print("✓ Mudanças detectadas")
+                print("✓ Analisando alterações...")
+                diff_summary = git_diff_summary_command("")
                 
-            if user_input:
-                # Verificar se é um pedido de commit semântico
-                is_commit_request = False
-                if (("commit" in user_input.lower() and 
-                    ("message" in user_input.lower() or 
-                     "semantic" in user_input.lower() or 
-                     "baseado" in user_input.lower() or
-                     "based on" in user_input.lower() or
-                     "mudanças" in user_input.lower() or
-                     "alterações" in user_input.lower())) or
-                     "commitar" in user_input.lower()):
-                    
-                    print("Detectado pedido de commit semântico...")
-                    status_result = git_status_command("")
-                    
-                    if "modified:" in status_result or "Changes not staged for commit" in status_result:
-                        diff_summary = git_diff_summary_command("")
-                        message_input = f"Gere uma mensagem de commit semântica baseada nas seguintes alterações:\n{diff_summary}"
-                        
-                        # Chamar o LLM diretamente para gerar a mensagem de commit
-                        commit_msg = generate_semantic_commit_message(diff_summary)
-                        
-                        # Executar git add e commit 
-                        result = git_add_commit_command(commit_msg)
-                        print(f"\nResultado: {result}")
-                        
-                        # Reset dos contadores após commit bem-sucedido
-                        tool_calls_counter = {}
-                        total_tool_calls = 0
-                        
-                        # Considerar a tarefa cumprida - não passar para o agente
-                        is_commit_request = True
-                        current_chat_history = []  # Reinicia histórico após commit
-                    else:
-                        print("\nNão foram encontradas alterações para commitar. Working tree clean.")
+                # Gerar mensagem de commit semântica
+                commit_msg = generate_semantic_commit_message(diff_summary)
+                print(f"✓ Mensagem gerada: {commit_msg}")
                 
-                if not is_commit_request:
-                    # Processar normalmente com o agente
-                    print("\nProcessando...")
-                    messages = current_chat_history + [HumanMessage(content=user_input)]
-                    
-                    # Definir ferramentas, configurar e chamar o workflow do agente
-                    # (resto do código de processamento)
-                    
-                    # Adicionar saída ao histórico
-                    current_chat_history.append(HumanMessage(content=user_input))
-                    current_chat_history.append(AIMessage(content=output))
-                    
-                    # Reset dos contadores após tarefa concluída com resposta final
-                    if output and not output.startswith("---"):
-                        tool_calls_counter = {}
-                        total_tool_calls = 0
-            
-        except KeyboardInterrupt:
-            print("\nExiting assistant due to user interrupt...")
-            break
-        except Exception as e:
-            print(f"An error occurred in the interactive loop: {e}")
-            import traceback
-            traceback.print_exc()
+                # Executar commit
+                print(f"✓ Realizando commit...")
+                result = git_add_commit_command(commit_msg)
+                print(f"\n{result}")
+                
+                # Reset contadores
+                global tool_calls_counter, total_tool_calls
+                tool_calls_counter = {}
+                total_tool_calls = 0
+                return True
+            else:
+                print("Não há alterações para commitar. Working tree clean.")
+                return True
+        elif "message" in user_input.lower() and re.search(r'["\'](.*?)["\']', user_input):
+            # Commit com mensagem específica
+            print("Detecção direta: Commit com mensagem fornecida")
+            match = re.search(r'["\'](.*?)["\']', user_input)
+            if match:
+                commit_msg = match.group(1)
+                print(f"✓ Mensagem detectada: {commit_msg}")
+                result = git_add_commit_command(commit_msg)
+                print(f"\n{result}")
+                return True
+        else:
+            # Commit simples
+            print("Detecção direta: Commit simples")
+            # Verificar se há mudanças para commitar
+            status = git_status_command("")
+            if "modified:" in status or "Changes not staged for commit" in status:
+                print("✓ Alterações detectadas")
+                
+                # Extrair nomes dos arquivos alterados
+                files_pattern = re.findall(r"modified:\s+([^\n]+)", status)
+                if files_pattern:
+                    files_context = ", ".join(file.strip() for file in files_pattern)
+                    commit_msg = f"update: {files_context}"
+                else:
+                    commit_msg = "update: alterações diversas"
+                
+                print(f"✓ Usando mensagem: {commit_msg}")
+                result = git_add_commit_command(commit_msg)
+                print(f"\n{result}")
+                return True
+            else:
+                print("Não há alterações para commitar. Working tree clean.")
+                return True
+    
+    # Verificar se é um pedido de push
+    elif any(re.search(pattern, user_input.lower()) for pattern in push_patterns):
+        print("Detecção direta: Pedido de push")
+        # Verificar se há alterações não commitadas
+        status = git_status_command("")
+        if "modified:" in status or "Changes not staged for commit" in status:
+            print("Existem alterações não commitadas:")
+            print(status)
+            print("\nDeseja commitar essas alterações antes do push? (y/n)")
+            response = input().lower()
+            if response.startswith("y"):
+                # Commit antes do push
+                diff_summary = git_diff_summary_command("")
+                commit_msg = generate_semantic_commit_message(diff_summary)
+                print(f"✓ Mensagem gerada: {commit_msg}")
+                commit_result = git_add_commit_command(commit_msg)
+                print(f"\n{commit_result}")
+            else:
+                print("Pulando commit, apenas fazendo push das alterações já commitadas.")
+        
+        # Fazer push
+        print("✓ Fazendo push...")
+        result = git_push_command("")
+        print(f"\n{result}")
+        return True
+    
+    # Verificar se é um pedido de status
+    elif any(re.search(pattern, user_input.lower()) for pattern in status_patterns):
+        print("Detecção direta: Pedido de status")
+        result = git_status_command("")
+        print(f"\n{result}")
+        return True
+        
+    # Se não identificamos como um comando direto
+    return False
 
 def run_agent(query: str, chat_history: list = None, prefix_prompt: str = None) -> tuple:
     """Runs the agent with a query and returns the result.
