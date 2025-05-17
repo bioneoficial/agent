@@ -82,43 +82,42 @@ def main():
             name="Terminal",
             func=run_terminal_command,
             description=(
-                "Use this tool to execute a general command in the macOS terminal. "
-                "The input to this tool should be ONLY the command string you want to execute. "
-                "For example, if you want to list files, the input should be 'ls'. "
-                "Do NOT include the tool name or brackets in the input string. "
-                "Prefer specialized Git tools if available for Git operations."
+                "Use this tool for executing GENERAL macOS terminal commands. "
+                "Input should be ONLY the command string (e.g., 'ls -la' or 'pwd'). "
+                "IMPORTANT: For Git-specific operations (like status, branch, commit), ALWAYS prefer the dedicated Git tools "
+                "(GitStatus, GitCurrentBranch, GitCreateBranch, GitAddCommit) INSTEAD of using this general Terminal tool with git commands."
             ),
         ),
         Tool(
             name="GitStatus",
             func=git_status_command,
             description=(
-                "Useful for getting the current status of the Git repository (e.g., modified files, current branch). "
-                "Takes no effective input (input string is ignored)."
+                "This is the PREFERRED tool for getting the current status of the Git repository (e.g., modified files, current branch). "
+                "It directly executes 'git status'. Takes no effective input (input string is ignored)."
             ),
         ),
         Tool(
             name="GitCurrentBranch",
             func=git_current_branch_command,
             description=(
-                "Useful for finding out the name of the currently active Git branch. "
-                "Takes no effective input (input string is ignored)."
+                "This is the PREFERRED tool for finding out the name of the currently active Git branch. "
+                "It directly executes 'git rev-parse --abbrev-ref HEAD'. Takes no effective input (input string is ignored)."
             ),
         ),
         Tool(
             name="GitCreateBranch",
             func=git_create_branch_command,
             description=(
-                "Creates a new Git local branch with the given name and switches to it. "
-                "Input should be the desired name of the new branch (e.g., 'feature/login')."
+                "This is the PREFERRED tool for creating a new Git local branch and switching to it. "
+                "It executes 'git checkout -b [branch_name]'. Input MUST be ONLY the desired name of the new branch (e.g., 'feature/login')."
             ),
         ),
         Tool(
             name="GitAddCommit",
             func=git_add_commit_command,
             description=(
-                "Stages all current changes (git add .) and then commits them with the provided message. "
-                "Input should be the commit message as a string (e.g., 'Implemented user authentication')."
+                "This is the PREFERRED tool for staging all current changes (git add .) and then committing them with a message. "
+                "Input MUST be ONLY the commit message string (e.g., 'Implemented user authentication')."
             ),
         ),
     ]
@@ -130,14 +129,14 @@ def main():
         agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
         verbose=True,
         handle_parsing_errors=True,
-        # Adding a prefix to guide the agent's persona and task
         agent_kwargs={
             'prefix': (
-                "You are a helpful AI assistant that operates within a macOS terminal. "
-                "Your goal is to assist the user with terminal commands, Git operations, and file system tasks. "
-                "When using a tool, provide the action and then the input on separate lines if the tool requires input. "
-                "If a tool takes no input, you can provide an empty string or a placeholder for the Action Input. "
-                "Always try to use a specialized Git tool if one exists for the user's request before resorting to the general Terminal tool for Git commands."
+                "You are a precise and helpful AI assistant designed to operate within a macOS terminal. "
+                "Your main goal is to assist the user with terminal commands, Git operations, and file system tasks. "
+                "When using a tool that requires input, provide the Action and then the Action Input on separate lines. "
+                "If a tool takes no input (like GitStatus or GitCurrentBranch), you can provide an empty string for the Action Input. "
+                "CRITICAL INSTRUCTION: For Git operations (status, branch checking/creation, committing), you MUST prioritize using the specialized Git tools "
+                "(GitStatus, GitCurrentBranch, GitCreateBranch, GitAddCommit) over the general 'Terminal' tool. Only use 'Terminal' for Git commands if NO specialized tool fits the exact need."
             )
         }
     )
