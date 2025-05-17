@@ -89,19 +89,20 @@ def git_log_short_command(_: str) -> str:
 def git_push_command(branch_name: str = None) -> str:
     """Pushes commits to a remote repository. 
     If a branch_name is provided, it attempts to push to 'origin <branch_name>'. 
-    If no branch_name is provided, it attempts a simple 'git push' which relies on the current branch's upstream configuration.
-    Input can be an optional branch name string. If no branch name is given, provide an empty string or omit.
+    If no branch_name is provided (e.g., None, empty string, whitespace, or literal "''"), 
+    it attempts a simple 'git push' which relies on the current branch's upstream configuration.
+    Input can be an optional branch name string. 
+    If no branch name is given, provide an empty string or omit.
     """
-    if branch_name and isinstance(branch_name, str) and branch_name.strip():
-        sanitized_branch_name = branch_name.strip()
-        # A more robust sanitization might be needed if there are concerns about special characters.
-        # For now, assuming typical branch names.
-        return execute_direct_command(["git", "push", "origin", sanitized_branch_name])
-    else:
+    # Handles: None, "", " ", "''" --> simple "git push"
+    # Handles: "main", " feature/abc " --> "git push origin <branch>"
+    if branch_name is None or not branch_name.strip() or branch_name == "''":
         # Attempt a simple git push
-        # This might fail if upstream is not set, or if force push is needed etc.
-        # The error message from git should be informative.
         return execute_direct_command(["git", "push"])
+    else:
+        # A specific branch name is provided
+        sanitized_branch_name = branch_name.strip()
+        return execute_direct_command(["git", "push", "origin", sanitized_branch_name])
 
 def main():
     print(f"Loading Ollama LLM (llama3:8b) as ChatModel...")
@@ -148,7 +149,7 @@ def main():
             func=git_create_branch_command,
             description=(
                 "This is the PREFERRED tool for creating a new Git local branch and switching to it. "
-                "Input MUST be ONLY the desired name of the new branch (e.g., 'feature/login')."
+                "Input MUST be ONLY the desired name of the new branch (e.g., 'feature/login'). No extra text or formatting."
             ),
         ),
         Tool(
@@ -156,7 +157,7 @@ def main():
             func=git_add_commit_command,
             description=(
                 "This is the PREFERRED tool for staging all current changes (git add .) and then committing them with a message. "
-                "Input MUST be ONLY the commit message string (e.g., 'Implemented user authentication')."
+                "Input MUST be ONLY the commit message string (e.g., 'Implemented user authentication'). No extra text or formatting."
             ),
         ),
         Tool(
@@ -181,8 +182,8 @@ def main():
             description=(
                 "This is the PREFERRED tool for pushing local commits to the remote 'origin'. "
                 "It can take an OPTIONAL branch name as input. "
-                "If a branch name is provided (e.g., 'main' or 'feature/my-feat'), it will push to that specific branch on origin. "
-                "If NO branch name is provided (e.g., empty string for Action Input), it will attempt a simple 'git push' which pushes the current branch to its configured upstream. "
+                "If a specific branch name is provided (e.g., 'main' or 'feature/my-feat'), it will push to that specific branch on origin. Provide ONLY the branch name as Action Input. "
+                "If NO branch name is intended for the push (to attempt a simple 'git push' for the current branch), the Action Input MUST be an empty string (e.g., ''). "
                 "Use this tool when the user asks to send, upload, or synchronize their commits to the remote repository."
             ),
         ),
@@ -205,21 +206,29 @@ def main():
                 "1. Thought: Understand the user's specific request and plan your action. Consider if all necessary information (like a branch name for a push) is available or if you need to ask the user first. "
                 "2. Action: On a new line, write the name of the single best specialized tool for the task if one exists (e.g., GitStatus, GitPush). "
                 "   If no specialized tool fits, and the task is a general terminal command, use the 'Terminal' tool. "
-                "3. Action Input: On the very next line, write the input required by the chosen tool. If the tool takes no input, write an empty string or a placeholder like '' or 'no input'. "
-                "   For the 'Terminal' tool, the Action Input MUST be a valid shell command string. For creating files with content, use the format: echo \"your content here\" > filename.txt "
+                "3. Action Input: On the very next line, write the input required by the chosen tool. "
+                "   - If the tool takes no input (like GitStatus), write an empty string: '' or 'no input'. "
+                "   - For the 'Terminal' tool, the Action Input MUST be a valid shell command string. For creating files with content, use the format: echo \"your content here\" > filename.txt "
+                "   - For tools like GitCreateBranch, GitAddCommit, or GitPush (when a branch is specified), the Action Input MUST be *only* the value itself (e.g., 'feature/new-thing' or 'Initial commit'). Do NOT add any extra words, newlines, or conversational text. "
+                "   - If GitPush is used for a simple push (current branch to its upstream without specifying a branch name explicitly), the Action Input line should be empty after 'Action Input:' (i.e., just a newline character), which will pass an empty string or None to the tool. "
                 "4. OBSERVE: After the tool executes, you will receive an Observation. "
                 "5. CRITICAL: If the Observation indicates successful execution OR directly and fully answers the user's request, your response MUST be ONLY: "
                 "   Thought: I have the answer or the action is complete. "
                 "   Final Answer: [Provide the direct answer or confirmation here]. "
                 "   Do not take further unnecessary actions. "
-                "6. If the Observation indicates an error OR if more steps are truly needed (e.g., a command requires an argument you don't have yet), then your Thought should explain this. If you need more information from the user, your Final Answer should be a question to the user asking for that specific piece of information. Then stop and wait for user's response. Do not try to invent information. "
-                "Example - User asks to push, but doesn't specify branch and simple push might be ambiguous: "
-                "Thought: The user wants to push commits. A simple 'git push' might work, or I might need to specify 'origin <branch>'. I will try a simple push first if no branch is specified by the user. If the user specified a branch, I will use it. If the tool gives an error about ambiguity or needing a branch, I will ask the user. "
+                "6. If the Observation indicates an error OR if more steps are truly needed (e.g., a command requires an argument you don't have yet), then your Thought should explain this. If you need more information from the user, your Final Answer should be a question to the user asking for that specific piece of information. Then stop and wait for user's response. Do not try to invent information. When asking the user for information, your response MUST consist ONLY of a Thought and then a Final Answer containing the question. DO NOT attempt to use any Tool or Action in this specific response turn. "
+                "7. CONTEXT HANDLING: If your previous 'Final Answer' was a question to the user, and the new user input appears to be the answer to that question, you MUST use this new information to attempt to complete the ORIGINAL task or goal. Do not treat the user's answer as a new, unrelated command unless it's clearly a change of topic. Re-evaluate the original goal with this new information. "
+                "Example - User asks to push, but doesn't specify branch: "
+                "Thought: The user wants to push commits. A simple 'git push' might work, or I might need to specify 'origin <branch>'. I will try a simple push first by providing an empty Action Input to GitPush. "
                 "Action: GitPush "
-                "Action Input: [branch_name_if_provided_else_empty_string] "
+                "Action Input: "
                 "(after observation, if error indicates branch is needed) "
                 "Thought: The push failed because the upstream is not set or is ambiguous. I need to ask the user for the specific branch name they want to push to. "
                 "Final Answer: Which branch would you like to push to origin? "
+                "Example - User then responds with 'my-feature-branch': "
+                "Thought: The user has provided 'my-feature-branch' as the answer to my question about which branch to push to. I will now attempt to push to this branch. "
+                "Action: GitPush "
+                "Action Input: my-feature-branch "
                 "Be concise and direct in your Final Answer or question to the user."
             )
         }
