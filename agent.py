@@ -82,20 +82,29 @@ def parse_llm_output(llm_output: str) -> dict:
         action_input_raw = thought_action_match.group(4).strip()
         
         # Clean up action input - remove common phrases that aren't actual inputs
-        action_input_str = action_input_raw.split("\n")[0].strip()  # Only take first line
+        # Only take first line or up to first parenthesis or explanation
+        action_input_str = action_input_raw.split("\n")[0]
         
-        # Handle special cases
-        if action_input_str.lower() in ["(empty string)", "empty string", "''", '""', "no input"]:
+        # If the input contains explanations in parentheses, only take the part before that
+        if "(" in action_input_str:
+            action_input_str = action_input_str.split("(")[0].strip()
+        
+        # If after splitting we're left with something empty, make it explicitly empty
+        action_input_str = action_input_str.strip()
+        
+        # Handle special cases for empty/null inputs
+        if not action_input_str or action_input_str.lower() in ["(empty string)", "empty string", "''", '""', 
+                                                           "no input", "none", "null", "empty"]:
             action_input_str = ""
         elif action_input_str.startswith("'") and action_input_str.endswith("'"):
             # Remove single quotes if they're wrapping the entire string
             action_input_str = action_input_str[1:-1].strip()
+        elif action_input_str.startswith('"') and action_input_str.endswith('"'):
+            # Remove double quotes if they're wrapping the entire string
+            action_input_str = action_input_str[1:-1].strip()
         
-        # The input of the tool for Langchain ToolExecutor is a single string or dict.
-        # Our current tools expect a string.
-        # If action_input_str is "", None, or just spaces, pass an empty string to the tool.
-        # The tool logic (e.g., git_push_command) must handle empty input if appropriate.
-        tool_input_for_invocation = action_input_str if action_input_str.strip() else ""
+        # Final validation to normalize the result
+        tool_input_for_invocation = action_input_str.strip()
 
         return {
             "type": "action", 
@@ -128,6 +137,11 @@ def execute_direct_command(command_parts: list[str]) -> str:
     Takes a list of command parts (e.g., ['git', 'status']).
     Used by specialized tools like Git tools.
     """
+    # Filter out empty command parts to avoid errors
+    command_parts = [part for part in command_parts if part]
+    if not command_parts:
+        return "Error: No command provided"
+        
     command_str_for_error_reporting = shlex.join(command_parts)
     try:
         result = subprocess.run(
@@ -209,22 +223,45 @@ def git_push_command(branch_name: str = None) -> str:
     Input can be an optional branch name string. 
     If no branch name is given, provide an empty string or omit.
     """
-    # Handles: None, "", " ", "''" --> simple "git push"
-    # Handles: "main", " feature/abc " --> "git push origin <branch>"
-    if branch_name is None or not branch_name.strip() or branch_name == "''":
-        # Attempt a simple git push
-        result = execute_direct_command(["git", "push"])
-        # Check if error message contains "no upstream branch" indicating need to set upstream
-        if "no upstream branch" in result:
-            # Get current branch name
-            current_branch = execute_direct_command(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    # First, check if there are uncommitted changes
+    status_output = execute_direct_command(["git", "status", "--porcelain"])
+    if status_output.strip():
+        return "There are uncommitted changes in your working directory. Would you like to commit them before pushing?"
+    
+    # Get current branch name for better messages
+    current_branch = execute_direct_command(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+    
+    # Clean up branch_name input to handle various "empty" inputs
+    empty_indicators = [None, "", "''", '""', "empty string", "(empty string)", "no input"]
+    is_empty_input = branch_name is None or not str(branch_name).strip() or str(branch_name).strip().lower() in empty_indicators
+    
+    if is_empty_input:
+        # Check if branch already has an upstream set
+        has_upstream = "no upstream branch" not in execute_direct_command(["git", "status", "-sb"])
+        
+        if has_upstream:
+            # Check if we're already up to date with upstream
+            pull_check = execute_direct_command(["git", "pull", "--dry-run"])
+            if "Already up to date" in pull_check:
+                return f"Branch '{current_branch}' is already up to date with its upstream."
+            
+            # Attempt a simple git push
+            result = run_shell_command_string("git push")
+            if "Everything up-to-date" in result:
+                return f"Branch '{current_branch}' is already up to date with remote."
+            return result
+        else:
             # Execute git push with --set-upstream
-            return execute_direct_command(["git", "push", "--set-upstream", "origin", current_branch])
-        return result
+            return run_shell_command_string(f"git push --set-upstream origin {current_branch}")
     else:
         # A specific branch name is provided
-        sanitized_branch_name = branch_name.strip()
-        return execute_direct_command(["git", "push", "origin", sanitized_branch_name])
+        sanitized_branch_name = str(branch_name).strip()
+        # Remove any quotes that might be around the branch name
+        if (sanitized_branch_name.startswith("'") and sanitized_branch_name.endswith("'")) or \
+           (sanitized_branch_name.startswith('"') and sanitized_branch_name.endswith('"')):
+            sanitized_branch_name = sanitized_branch_name[1:-1]
+            
+        return run_shell_command_string(f"git push origin {sanitized_branch_name}")
 
 # --- LangGraph Nodes ---
 
@@ -254,12 +291,8 @@ def call_model(state: AgentState) -> dict:
 
     current_input = state["input"]
     
-    # Formato do prompt para ReAct
-    # Adicionar o histórico de chat também, se houver, antes do scratchpad.
-    # Por enquanto, o histórico de chat está implícito no agent_outcome se o reformarmos.
-    # A AgentState tem chat_history, mas não estamos usando explicitamente para construir o prompt ReAct ainda.
-    # O prefixo já pede para o LLM seguir o formato Thought/Action/Action Input/Observation/Final Answer
-
+    # Enhanced prompt for better reasoning
+    # Add explicit guidance for the LLM to think through the request before taking action
     prompt_template = (
         f"{agent_prefix_prompt_global}\n\n"
         "TOOLS:\n"
@@ -272,6 +305,10 @@ def call_model(state: AgentState) -> dict:
         "USER'S CURRENT REQUEST:\n"
         "-----------------------\n"
         "{input}\n\n"
+        "When working with Git commands, first think about what state the repository is in and what the user wants to achieve. "
+        "For push operations, consider: Are there uncommitted changes? Does the branch have upstream tracking set? "
+        "For commit operations, are there changes to commit? "
+        "Use the appropriate tools to check the status first before performing operations.\n\n"
         "Thought:"
     )
 
@@ -296,6 +333,17 @@ def call_model(state: AgentState) -> dict:
 
         parsed_output = parse_llm_output(llm_output_text)
         thought_text = parsed_output.get("thought", llm_output_text if not parsed_output.get("type") == "action" else "") # Pega o pensamento ou o output bruto se não houver ação
+
+        # If the LLM output contains indications of checking Git status or suggestions to commit first,
+        # handle that explicitly to improve the agent's reasoning
+        if parsed_output["type"] == "action" and parsed_output["tool_call"].tool == "GitPush":
+            # Add custom handling to ensure the agent checks for uncommitted changes properly
+            if "uncommitted changes" in thought_text.lower() or "need to commit" in thought_text.lower():
+                # The agent is already thinking about the right things
+                pass
+            else:
+                # Encourage checking repository state
+                thought_text = f"I should first check if there are uncommitted changes before pushing. {thought_text}"
 
         if parsed_output["type"] == "finish":
             final_output = parsed_output["return_values"]["output"]
@@ -348,6 +396,20 @@ def execute_tool_node(state: AgentState) -> dict:
         print(f"Error: next_action is not a ToolInvocation: {action_to_execute}")
         return {"error": True, "error_message": f"next_action is not a ToolInvocation: {action_to_execute}"}
 
+    # Handle empty or None inputs explicitly
+    tool_input = action_to_execute.tool_input
+    if tool_input is None:
+        tool_input = ""
+    
+    # For GitPush with empty input, ensure it's really empty
+    if action_to_execute.tool == "GitPush" and (not tool_input or tool_input.strip() in ["''", '""', "empty", "empty string", "(empty string)"]):
+        tool_input = ""
+        action_to_execute = ToolInvocation(tool=action_to_execute.tool, tool_input=tool_input)
+    
+    # For GitStatus, enhance the response to provide clearer information about repository state
+    if action_to_execute.tool == "GitStatus":
+        print("Enhanced GitStatus check for better repository state reporting.")
+    
     print(f"Executing tool: {action_to_execute.tool} with input: {action_to_execute.tool_input}")
     updated_agent_outcome = list(state["agent_outcome"]) # Criar cópia para modificar
     
@@ -355,6 +417,15 @@ def execute_tool_node(state: AgentState) -> dict:
         observation = tool_executor_global.invoke(action_to_execute)
         print(f"Tool Observation: {observation}")
 
+        # Enhanced response processing for Git tools
+        if action_to_execute.tool == "GitPush":
+            if "uncommitted changes" in observation:
+                # Convert this into a more explicit question for the user about committing
+                observation = f"{observation} Would you like me to commit these changes for you before pushing?"
+            elif "already up to date" in observation.lower():
+                # Provide a clearer confirmation for up-to-date branches
+                observation = f"{observation} Your branch is already synchronized with the remote."
+        
         if updated_agent_outcome:
             last_outcome_item = updated_agent_outcome[-1]
             if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
@@ -369,13 +440,33 @@ def execute_tool_node(state: AgentState) -> dict:
              updated_agent_outcome.append((f"DirectObservationFor_{action_to_execute.tool}", str(observation)))
              print("Warning: agent_outcome was empty before adding tool observation. This is unexpected.")
 
-        return {
-            "agent_outcome": updated_agent_outcome,
-            "next_action": None, # Limpa a ação após execução
-            "final_response": None, # Garante que não haja resposta final neste passo
-            "error": False,
-            "error_message": None
-        }
+        # If we're asking the user about uncommitted changes, let's format it as a final response
+        if action_to_execute.tool == "GitPush" and "uncommitted changes" in observation:
+            return {
+                "agent_outcome": updated_agent_outcome,
+                "next_action": None,
+                "final_response": observation,  # Directly return the observation about uncommitted changes
+                "error": False,
+                "error_message": None
+            }
+        # For successful push operations with a clear message
+        elif action_to_execute.tool == "GitPush" and "already up to date" in observation.lower():
+            return {
+                "agent_outcome": updated_agent_outcome,
+                "next_action": None,
+                "final_response": observation,  # Directly return the confirmation
+                "error": False,
+                "error_message": None
+            }
+        # Otherwise, continue with normal tool execution flow
+        else:
+            return {
+                "agent_outcome": updated_agent_outcome,
+                "next_action": None, # Limpa a ação após execução
+                "final_response": None, # Garante que não haja resposta final neste passo
+                "error": False,
+                "error_message": None
+            }
     except Exception as e:
         error_msg = f"Error executing tool {action_to_execute.tool}: {str(e)}"
         print(error_msg)
@@ -443,8 +534,6 @@ def main():
         # Renomear a variável local para não sombrear a global, ou atribuir diretamente
         local_llm = ChatOllama(model="llama3:8b")
         local_llm.invoke("Hello, are you working?") # Test call
-        llm_model = local_lll = ChatOllama(model="llama3:8b")
-        local_llm.invoke("Hello, are you working?") # Test call
         llm_model = local_llm # Atribuir à global
         print("Ollama ChatModel loaded successfully.")
     except Exception as e:
@@ -470,6 +559,7 @@ def main():
             func=git_status_command,
             description=(
                 "This is the PREFERRED tool for getting the current status of the Git repository. "
+                "Use this to check for uncommitted changes before pushing or to get the branch's status relative to its upstream. "
                 "Takes no effective input."
             ),
         ),
@@ -478,6 +568,7 @@ def main():
             func=git_current_branch_command,
             description=(
                 "This is the PREFERRED tool for finding out the name of the currently active Git branch. "
+                "Use this when you need to reference the current branch name in other commands or inform the user. "
                 "Takes no effective input."
             ),
         ),
@@ -518,10 +609,11 @@ def main():
             func=git_push_command,
             description=(
                 "This is the PREFERRED tool for pushing local commits to the remote 'origin'. "
-                "It can take an OPTIONAL branch name as input. "
-                "If a specific branch name is provided (e.g., 'main' or 'feature/my-feat'), it will push to that specific branch on origin. Provide ONLY the branch name as Action Input. "
-                "If NO branch name is intended for the push (to attempt a simple 'git push' for the current branch), the Action Input MUST be an empty string (e.g., ''). "
-                "Use this tool when the user asks to send, upload, or synchronize their commits to the remote repository."
+                "It checks for uncommitted changes first and will inform you if there are any before pushing. "
+                "If no branch name is provided (empty string), it pushes the current branch. "
+                "If a specific branch name is provided, it pushes that branch to origin. "
+                "Input can be empty (just leave Action Input blank) to push current branch, or provide a specific branch name. "
+                "The tool will automatically set upstream tracking if needed."
             ),
         ),
     ]
@@ -535,38 +627,21 @@ def main():
     current_agent_prefix = (
         "You are a precise and helpful AI assistant for the macOS terminal. "
         "Your main goal is to assist the user with terminal commands, Git operations, and file system tasks. "
-        "Follow these steps strictly for each user request: "
-        "1. Thought: Understand the user's specific request and plan your action. Consider if all necessary information (like a branch name for a push) is available or if you need to ask the user first. "
-        "2. Action: On a new line, write the name of the single best specialized tool for the task if one exists (e.g., GitStatus, GitPush). "
-        "   If no specialized tool fits, and the task is a general terminal command, use the 'Terminal' tool. "
-        "3. Action Input: On the very next line, write the input required by the chosen tool. "
-        "   - If the tool takes no input (like GitStatus), write an empty string: '' or 'no input'. "
-        "   - For the 'Terminal' tool: the Action Input MUST be *exclusively* the exact shell command string required for the task (e.g., 'ls -la', 'rm my_file.txt', 'echo \"text\" > new.txt'). ABSOLUTELY NO other text, such as your own explanations, reasoning, or conversational remarks, should be included in the Action Input for the Terminal tool. "
-        "   - For tools like GitCreateBranch, GitAddCommit, or GitPush (when a branch is specified), the Action Input MUST be *only* the value itself (e.g., 'feature/new-thing' or 'Initial commit'). Do NOT add any extra words, newlines, or conversational text. "
-        "   - If GitPush is used for a simple push (current branch to its upstream without specifying a branch name explicitly), the Action Input line should be empty after 'Action Input:' (i.e., just a newline character), which will pass an empty string or None to the tool. "
-        "4. OBSERVE: After the tool executes, you will receive an Observation. "
-        "5. CRITICAL: If the Observation indicates successful execution OR directly and fully answers the user's request, your response MUST be ONLY: "
-        "   Thought: I have the answer or the action is complete. "
-        "   Final Answer: [Provide the direct answer or confirmation here]. "
-        "   Do not take further unnecessary actions. "
-        "6. If the Observation indicates an error OR if more steps are truly needed (e.g., a command requires an argument you don't have yet), then your Thought should explain this. "
-        "   If your plan is to ask the user for more information: "
-        "     a. Your response for this turn MUST be ONLY a Thought explaining why you need to ask, followed by a Final Answer containing ONLY the direct question to the user. "
-        "     b. CRITICALLY: You MUST NOT use any 'Action:' or any tool in this turn. Your ONLY output is the Thought and the Final Answer (the question). Any other tool use at this stage is a failure to follow instructions. "
-        "   Then stop and wait for the user's response. Do not try to invent information. "
-        "7. CONTEXT HANDLING: If your previous 'Final Answer' was a question to the user, and the new user input appears to be the answer to that question, you MUST use this new information to attempt to complete the ORIGINAL task or goal. Do not treat the user's answer as a new, unrelated command unless it's clearly a change of topic. Re-evaluate the original goal with this new information. "
-        "Example - User asks to push, but doesn't specify branch: "
-        "Thought: The user wants to push commits. A simple 'git push' might work, or I might need to specify 'origin <branch>'. I will try a simple push first by providing an empty Action Input to GitPush. "
-        "Action: GitPush "
-        "Action Input: "
-        "(after observation, if error indicates branch is needed) "
-        "Thought: The push failed because the upstream is not set or is ambiguous. I need to ask the user for the specific branch name they want to push to. "
-        "Final Answer: Which branch would you like to push to origin? "
-        "Example - User then responds with 'my-feature-branch': "
-        "Thought: The user has provided 'my-feature-branch' as the answer to my question about which branch to push to. I will now attempt to push to this branch. "
-        "Action: GitPush "
-        "Action Input: my-feature-branch "
-        "Be concise and direct in your Final Answer or question to the user."
+        "Follow these steps for every user request: "
+        "1. THINK: Evaluate the request and plan your response. When dealing with Git operations, think about the current state of the repository: "
+        "   - For push operations, check if there are uncommitted changes first, and if the current branch has an upstream. "
+        "   - For branch operations, check the current branch name before creating or switching. "
+        "   - For commit operations, check if there are actual changes to commit. "
+        "2. STEPS: Break down complex operations into logical steps and execute them in sequence. "
+        "3. ACTION: Choose the most appropriate tool for each step: "
+        "   - For Git operations, prefer the specialized Git tools (GitStatus, GitPush, GitAddCommit, etc.) over general Terminal commands. "
+        "   - For checking repository state, use GitStatus before performing operations. "
+        "   - When pushing, you can use GitPush with an empty input to push the current branch. "
+        "4. VALIDATE: After each action, verify if it was successful and adjust your next steps accordingly. "
+        "5. RESPONSE: Provide clear and concise responses to the user. If a task requires multiple steps, explain what you're doing. "
+        "   If you receive information that the branch is already up to date or there are uncommitted changes, relay this to the user. "
+        "   If the user needs to make a decision (like committing changes before pushing), clearly present the options."
+        "Keep your explanations concise while being helpful. Always prefer using the specialized Git tools over general Terminal commands for Git operations."
     )
     agent_prefix_prompt_global = current_agent_prefix # Atribuir à global
 
