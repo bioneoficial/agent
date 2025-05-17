@@ -7,114 +7,88 @@ from langchain.agents.agent_types import AgentType
 from langchain_core.messages import HumanMessage
 
 # --- Funções de Execução de Comandos ---
-def run_terminal_command(command_parts: list[str]) -> str:
-    """Executes a command in the macOS terminal and returns its output.
-    Takes a list of command parts (e.g., ['ls', '-la']).
-    Attempts to run commands directly; uses shell=True only if redirection (>, >>) is detected.
+
+def execute_direct_command(command_parts: list[str]) -> str:
+    """Executes a pre-defined command directly using shell=False for safety.
+    Takes a list of command parts (e.g., ['git', 'status']).
+    Used by specialized tools like Git tools.
     """
     command_str_for_error_reporting = shlex.join(command_parts)
     try:
-        # Check for shell-specific operations like redirection
-        # This is a heuristic; more robust parsing might be needed for complex cases.
-        uses_shell_features = False
-        full_command_str = shlex.join(command_parts) # For potential shell=True execution
-        
-        if ">" in full_command_str or "<" in full_command_str or "|" in full_command_str or "&&" in full_command_str or ";" in full_command_str:
-            uses_shell_features = True
-
-        if uses_shell_features:
-            # For commands with redirection, pipes, etc., shell=True is needed.
-            # The command is joined back into a string.
-            # Ensure that if the command involves writing content to a file, e.g., echo "some content" > file.txt,
-            # the LLM forms the command string correctly.
-            result = subprocess.run(
-                full_command_str,
-                shell=True,
-                capture_output=True,
-                text=True,
-                check=True,
-                executable='/bin/zsh' # Explicitly use zsh for shell=True
-            )
-        else:
-            # For most other commands, run directly as a list of arguments (safer).
-            result = subprocess.run(
-                command_parts, 
-                capture_output=True,
-                text=True,
-                check=True
-            )
-        
+        result = subprocess.run(
+            command_parts, 
+            capture_output=True,
+            text=True,
+            check=True
+        )
         return result.stdout.strip() if result.stdout else "Command executed successfully (no output)."
     except subprocess.CalledProcessError as e:
-        return f"Error executing command '{command_str_for_error_reporting}': {e.stderr.strip()}"
+        return f"Error executing direct command '{command_str_for_error_reporting}': {e.stderr.strip()}"
     except FileNotFoundError:
-        return f"Error: The command '{command_parts[0]}' was not found. Please ensure it is installed and in your PATH."
+        return f"Error: The direct command '{command_parts[0]}' was not found. Please ensure it is installed and in your PATH."
     except Exception as e:
-        return f"An unexpected error occurred with command '{command_str_for_error_reporting}': {str(e)}"
+        return f"An unexpected error occurred with direct command '{command_str_for_error_reporting}': {str(e)}"
 
-# --- Funções Específicas para Git ---
-def git_status_command(_: str) -> str:
-    """Executes 'git status' and returns the output. Takes no input.
-    Use this to check the current status of the Git repository (e.g., modified files, current branch).
+def run_shell_command_string(command_string: str) -> str:
+    """Executes a command string using shell=True, allowing shell features like redirection and pipes.
+    This is used by the general 'Terminal' tool. The command_string comes from the LLM.
     """
-    return run_terminal_command(["git", "status"])
+    try:
+        result = subprocess.run(
+            command_string,
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=True,
+            executable='/bin/zsh' # Explicitly use zsh for shell=True
+        )
+        return result.stdout.strip() if result.stdout else "Shell command executed successfully (no output)."
+    except subprocess.CalledProcessError as e:
+        # Attempt to decode stderr if it's bytes, otherwise use as is
+        error_output = e.stderr
+        if isinstance(error_output, bytes):
+            try:
+                error_output = error_output.decode('utf-8')
+            except UnicodeDecodeError:
+                error_output = str(error_output) # Fallback to string representation
+        return f"Error executing shell command '{command_string}': {error_output.strip()}"
+    except FileNotFoundError: # This might not be hit often with shell=True if zsh itself is found
+        return f"Error: A command within '{command_string}' was not found. Please ensure it is installed and in your PATH."
+    except Exception as e:
+        return f"An unexpected error occurred with shell command '{command_string}': {str(e)}"
+
+# --- Funções Específicas para Git (now use execute_direct_command) ---
+def git_status_command(_: str) -> str:
+    return execute_direct_command(["git", "status"])
 
 def git_current_branch_command(_: str) -> str:
-    """Executes 'git rev-parse --abbrev-ref HEAD' to get the current branch name. Takes no input.
-    Use this to find out the name of the currently active Git branch.
-    """
-    return run_terminal_command(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    return execute_direct_command(["git", "rev-parse", "--abbrev-ref", "HEAD"])
 
 def git_create_branch_command(branch_name: str) -> str:
-    """Creates a new Git branch with the given name using 'git checkout -b [branch_name]'.
-    Input should be the name of the branch to create.
-    """
     if not branch_name or not isinstance(branch_name, str) or not branch_name.strip():
         return "Error: Branch name must be a non-empty string."
-    # Sanitize branch_name to prevent command injection, though subprocess with list of args is safer.
-    # Basic sanitization: remove typical shell metacharacters. A stricter allowlist is better for production.
-    safe_branch_name = shlex.quote(branch_name.strip()) # shlex.quote for safety if parts were joined to a string for shell=True
-    # Since we pass a list of args to run_terminal_command, direct use is fine if run_terminal_command doesn't use shell=True for this
-    return run_terminal_command(["git", "checkout", "-b", branch_name.strip()])
+    return execute_direct_command(["git", "checkout", "-b", branch_name.strip()])
 
 def git_add_commit_command(commit_message: str) -> str:
-    """Adds all changes to staging ('git add .') and then commits them with the given message.
-    Input should be the commit message string.
-    """
     if not commit_message or not isinstance(commit_message, str) or not commit_message.strip():
         return "Error: Commit message must be a non-empty string."
-    
-    add_result = run_terminal_command(["git", "add", "."])
-    # Allow `git add .` to run even if there are no changes if it doesn't error out for other reasons
-    # A more robust check would be to see if `git status --porcelain` is empty before `git add .`
-    # For now, we rely on git add . being idempotent or the commit failing if nothing to commit.
-    if "Error executing command" in add_result and "nothing to commit" not in add_result.lower():
+    add_result = execute_direct_command(["git", "add", "."])
+    if "Error executing direct command" in add_result and "nothing to commit" not in add_result.lower():
         return f"Error during 'git add .': {add_result}"
-    
-    # Pass commit message as a separate argument
-    commit_result = run_terminal_command(["git", "commit", "-m", commit_message.strip()])
-    
+    commit_result = execute_direct_command(["git", "commit", "-m", commit_message.strip()])
     if "nothing to commit" in commit_result.lower() or "no changes added to commit" in commit_result.lower() :
         return f"Git Add Result: {add_result}\nGit Commit Result: Nothing to commit or no changes added to commit."
-        
     return f"Git Add Result: {add_result}\nGit Commit Result: {commit_result}"
 
-# --- Novas Ferramentas Git ---
 def git_pull_command(_: str) -> str:
-    """Runs 'git pull' to fetch from and integrate with another repository or a local branch. Takes no input.
-    Use this to update your current local working branch with changes from the remote repository.
-    """
-    return run_terminal_command(["git", "pull"])
+    return execute_direct_command(["git", "pull"])
 
 def git_log_short_command(_: str) -> str:
-    """Runs 'git log --oneline -n 5' to show the last 5 commits in a short format. Takes no input.
-    Use this to get a quick overview of the recent commit history.
-    """
-    return run_terminal_command(["git", "log", "--oneline", "-n", "5"])
+    return execute_direct_command(["git", "log", "--oneline", "-n", "5"])
 
 
 def main():
-    print(f"Loading Ollama LLM (llama3:8b) as ChatModel...") # Keep f-string for consistency
+    print(f"Loading Ollama LLM (llama3:8b) as ChatModel...")
     try:
         llm = ChatOllama(model="llama3:8b")
         llm.invoke("Hello, are you working?")
@@ -127,13 +101,13 @@ def main():
     tools = [
         Tool(
             name="Terminal",
-            func=lambda cmd_str: run_terminal_command(shlex.split(cmd_str)),
+            func=run_shell_command_string, # Use the new function that takes a string and uses shell=True
             description=(
                 "Use this tool for executing GENERAL macOS terminal commands that are NOT Git related or if no specific tool exists. "
                 "Input should be a VALID single command string. "
                 "Example for listing files: 'ls -la'. "
                 "Example for printing working directory: 'pwd'. "
-                "Example for creating a file with content: 'echo \"hello world content\" > my_file.txt'. Note the escaped quotes for the content. "
+                "Example for creating a file with content: 'echo \"hello world content\" > my_file.txt'. The quotes around content are important. "
                 "IMPORTANT: For Git-specific operations (status, branch, commit, pull, log), ALWAYS prefer the dedicated Git tools."
             ),
         ),
@@ -141,8 +115,8 @@ def main():
             name="GitStatus",
             func=git_status_command,
             description=(
-                "This is the PREFERRED tool for getting the current status of the Git repository (e.g., modified files, current branch). "
-                "It directly executes 'git status'. Takes no effective input (input string is ignored)."
+                "This is the PREFERRED tool for getting the current status of the Git repository. "
+                "Takes no effective input."
             ),
         ),
         Tool(
@@ -150,7 +124,7 @@ def main():
             func=git_current_branch_command,
             description=(
                 "This is the PREFERRED tool for finding out the name of the currently active Git branch. "
-                "It directly executes 'git rev-parse --abbrev-ref HEAD'. Takes no effective input (input string is ignored)."
+                "Takes no effective input."
             ),
         ),
         Tool(
@@ -158,7 +132,7 @@ def main():
             func=git_create_branch_command,
             description=(
                 "This is the PREFERRED tool for creating a new Git local branch and switching to it. "
-                "It executes 'git checkout -b [branch_name]'. Input MUST be ONLY the desired name of the new branch (e.g., 'feature/login')."
+                "Input MUST be ONLY the desired name of the new branch (e.g., 'feature/login')."
             ),
         ),
         Tool(
@@ -166,7 +140,7 @@ def main():
             func=git_add_commit_command,
             description=(
                 "This is the PREFERRED tool for staging all current changes (git add .) and then committing them with a message. "
-                "Input MUST be ONLY the commit message string (e.g., 'Implemented user authentication'). Correctly handle quotes in the message if necessary by not including them in the input string unless they are part of the message itself."
+                "Input MUST be ONLY the commit message string (e.g., 'Implemented user authentication')."
             ),
         ),
         Tool(
@@ -174,15 +148,15 @@ def main():
             func=git_pull_command,
             description=(
                 "This is the PREFERRED tool for updating the current local working branch with changes from its remote counterpart (git pull). "
-                "Takes no effective input (input string is ignored)."
+                "Takes no effective input."
             ),
         ),
         Tool(
             name="GitLogShort",
             func=git_log_short_command,
             description=(
-                "This is the PREFERRED tool for viewing a short summary of the last 5 commits (git log --oneline -n 5). "
-                "Takes no effective input (input string is ignored)."
+                "This is the PREFERRED tool for viewing a short summary of the last 5 commits. "
+                "Takes no effective input."
             ),
         ),
     ]
@@ -194,8 +168,8 @@ def main():
         agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
         verbose=True,
         handle_parsing_errors=True,
-        max_iterations=10, # Prevent overly long loops during debugging
-        early_stopping_method="generate", # Stop if it generates a final answer
+        max_iterations=10, 
+        early_stopping_method="generate",
         agent_kwargs={
             'prefix': (
                 "You are a precise and helpful AI assistant for the macOS terminal. "
@@ -225,8 +199,7 @@ def main():
         }
     )
     print("Agent initialized.")
-
-    # Check if a command was passed as a command-line argument
+    
     if len(sys.argv) > 1:
         initial_command = " ".join(sys.argv[1:])
         print(f"Executing initial command: {initial_command}")
