@@ -86,6 +86,22 @@ def git_pull_command(_: str) -> str:
 def git_log_short_command(_: str) -> str:
     return execute_direct_command(["git", "log", "--oneline", "-n", "5"])
 
+def git_push_command(branch_name: str = None) -> str:
+    """Pushes commits to a remote repository. 
+    If a branch_name is provided, it attempts to push to 'origin <branch_name>'. 
+    If no branch_name is provided, it attempts a simple 'git push' which relies on the current branch's upstream configuration.
+    Input can be an optional branch name string. If no branch name is given, provide an empty string or omit.
+    """
+    if branch_name and isinstance(branch_name, str) and branch_name.strip():
+        sanitized_branch_name = branch_name.strip()
+        # A more robust sanitization might be needed if there are concerns about special characters.
+        # For now, assuming typical branch names.
+        return execute_direct_command(["git", "push", "origin", sanitized_branch_name])
+    else:
+        # Attempt a simple git push
+        # This might fail if upstream is not set, or if force push is needed etc.
+        # The error message from git should be informative.
+        return execute_direct_command(["git", "push"])
 
 def main():
     print(f"Loading Ollama LLM (llama3:8b) as ChatModel...")
@@ -101,14 +117,14 @@ def main():
     tools = [
         Tool(
             name="Terminal",
-            func=run_shell_command_string, # Use the new function that takes a string and uses shell=True
+            func=run_shell_command_string,
             description=(
                 "Use this tool for executing GENERAL macOS terminal commands that are NOT Git related or if no specific tool exists. "
                 "Input should be a VALID single command string. "
                 "Example for listing files: 'ls -la'. "
                 "Example for printing working directory: 'pwd'. "
                 "Example for creating a file with content: 'echo \"hello world content\" > my_file.txt'. The quotes around content are important. "
-                "IMPORTANT: For Git-specific operations (status, branch, commit, pull, log), ALWAYS prefer the dedicated Git tools."
+                "IMPORTANT: For Git-specific operations (status, branch, commit, pull, log, push), ALWAYS prefer the dedicated Git tools."
             ),
         ),
         Tool(
@@ -159,6 +175,17 @@ def main():
                 "Takes no effective input."
             ),
         ),
+        Tool(
+            name="GitPush",
+            func=git_push_command,
+            description=(
+                "This is the PREFERRED tool for pushing local commits to the remote 'origin'. "
+                "It can take an OPTIONAL branch name as input. "
+                "If a branch name is provided (e.g., 'main' or 'feature/my-feat'), it will push to that specific branch on origin. "
+                "If NO branch name is provided (e.g., empty string for Action Input), it will attempt a simple 'git push' which pushes the current branch to its configured upstream. "
+                "Use this tool when the user asks to send, upload, or synchronize their commits to the remote repository."
+            ),
+        ),
     ]
 
     print("Initializing agent...")
@@ -175,26 +202,25 @@ def main():
                 "You are a precise and helpful AI assistant for the macOS terminal. "
                 "Your main goal is to assist the user with terminal commands, Git operations, and file system tasks. "
                 "Follow these steps strictly for each user request: "
-                "1. Thought: Understand the user's specific request and plan your action. "
-                "2. Action: On a new line, write the name of the single best specialized tool for the task if one exists (e.g., GitStatus, GitCreateBranch). "
+                "1. Thought: Understand the user's specific request and plan your action. Consider if all necessary information (like a branch name for a push) is available or if you need to ask the user first. "
+                "2. Action: On a new line, write the name of the single best specialized tool for the task if one exists (e.g., GitStatus, GitPush). "
                 "   If no specialized tool fits, and the task is a general terminal command, use the 'Terminal' tool. "
                 "3. Action Input: On the very next line, write the input required by the chosen tool. If the tool takes no input, write an empty string or a placeholder like '' or 'no input'. "
                 "   For the 'Terminal' tool, the Action Input MUST be a valid shell command string. For creating files with content, use the format: echo \"your content here\" > filename.txt "
                 "4. OBSERVE: After the tool executes, you will receive an Observation. "
-                "5. CRITICAL: If the Observation indicates successful execution or directly and fully answers the user's request, your response MUST be ONLY: "
+                "5. CRITICAL: If the Observation indicates successful execution OR directly and fully answers the user's request, your response MUST be ONLY: "
                 "   Thought: I have the answer or the action is complete. "
                 "   Final Answer: [Provide the direct answer or confirmation here]. "
                 "   Do not take further unnecessary actions. "
-                "6. If the Observation indicates an error or if more steps are truly needed, repeat the Thought/Action/Action Input/Observation cycle. "
-                "Example of a complete thought/action block for a tool requiring input: "
-                "Thought: I need to list files in the current directory. The Terminal tool is appropriate. "
-                "Action: Terminal "
-                "Action Input: ls -l "
-                "Example for a tool taking no input: "
-                "Thought: I need to get the git status. The GitStatus tool is appropriate. "
-                "Action: GitStatus "
-                "Action Input: "
-                "Be concise and direct in your Final Answer."
+                "6. If the Observation indicates an error OR if more steps are truly needed (e.g., a command requires an argument you don't have yet), then your Thought should explain this. If you need more information from the user, your Final Answer should be a question to the user asking for that specific piece of information. Then stop and wait for user's response. Do not try to invent information. "
+                "Example - User asks to push, but doesn't specify branch and simple push might be ambiguous: "
+                "Thought: The user wants to push commits. A simple 'git push' might work, or I might need to specify 'origin <branch>'. I will try a simple push first if no branch is specified by the user. If the user specified a branch, I will use it. If the tool gives an error about ambiguity or needing a branch, I will ask the user. "
+                "Action: GitPush "
+                "Action Input: [branch_name_if_provided_else_empty_string] "
+                "(after observation, if error indicates branch is needed) "
+                "Thought: The push failed because the upstream is not set or is ambiguous. I need to ask the user for the specific branch name they want to push to. "
+                "Final Answer: Which branch would you like to push to origin? "
+                "Be concise and direct in your Final Answer or question to the user."
             )
         }
     )
