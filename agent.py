@@ -10,10 +10,12 @@ from langchain_core.agents import AgentAction, AgentFinish
 # from langchain_core.tools import ToolInvocation # Old problematic import
 
 # LangGraph imports
-from typing import TypedDict, Annotated, Sequence, List, Dict, Any, Union, Optional
+from typing import TypedDict, Annotated, Sequence, List, Dict, Any, Union, Optional, Set, Tuple
 import operator
 from langgraph.graph import StateGraph, END
 from langchain_core.tools import BaseTool
+import time
+from collections import defaultdict, deque
 
 # Adicionando Enum para categorização de erros
 from enum import Enum, auto
@@ -26,7 +28,221 @@ class ErrorCategory(Enum):
     COMMAND_NOT_FOUND = auto()  # Comando não encontrado
     AMBIGUOUS_INPUT = auto()    # Input ambíguo que precisa de esclarecimento
     NETWORK = auto()            # Erro de rede (ex: problemas ao fazer push/pull)
+    LOOP_DETECTED = auto()      # Loop de execução de ferramentas detectado
     UNKNOWN = auto()            # Erro desconhecido
+
+# Nova classe para rastreamento avançado de execução de ferramentas
+class ToolExecutionTracker:
+    def __init__(self, max_consecutive_calls=3, max_total_calls=15, window_size=5):
+        self.tool_calls = defaultdict(int)  # Contador por ferramenta
+        self.total_calls = 0  # Contador global
+        self.call_history = deque(maxlen=30)  # Histórico recente de chamadas
+        self.tool_timestamps = defaultdict(list)  # Timestamps por ferramenta
+        self.max_consecutive_calls = max_consecutive_calls
+        self.max_total_calls = max_total_calls
+        self.window_size = window_size  # Tamanho da janela para detecção de padrões
+        self.known_patterns = set()  # Padrões de repetição detectados
+    
+    def record_call(self, tool_name: str, tool_input: Any = None) -> Dict[str, Any]:
+        """
+        Registra uma chamada de ferramenta e verifica limites e padrões.
+        Retorna um dicionário com informações sobre o status da chamada.
+        """
+        current_time = time.time()
+        self.tool_calls[tool_name] += 1
+        self.total_calls += 1
+        self.call_history.append((tool_name, tool_input))
+        self.tool_timestamps[tool_name].append(current_time)
+        
+        # Resultado padrão: tudo ok
+        result = {
+            "exceeded_limit": False,
+            "loop_detected": False,
+            "pattern_detected": False,
+            "message": "",
+            "suggested_action": None
+        }
+        
+        # Verificar limite global
+        if self.total_calls > self.max_total_calls:
+            result["exceeded_limit"] = True
+            result["message"] = f"Limite global de chamadas excedido: {self.total_calls} > {self.max_total_calls}"
+            return result
+        
+        # Verificar limite específico da ferramenta
+        if self.tool_calls[tool_name] > self.max_consecutive_calls:
+            result["exceeded_limit"] = True
+            result["message"] = f"Limite para {tool_name} excedido: {self.tool_calls[tool_name]} > {self.max_consecutive_calls}"
+            
+            # Sugestões específicas baseadas na ferramenta
+            if tool_name == "GitStatus":
+                result["suggested_action"] = "GitAddCommit"
+            elif tool_name == "GitPush":
+                result["suggested_action"] = "FINISH"
+            
+            return result
+        
+        # Detecção de loop: mesmo padrão de chamadas repetidas
+        if len(self.call_history) >= 2 * self.window_size:
+            # Verificar se o padrão das últimas N chamadas se repete
+            pattern1 = tuple((t, str(i)) for t, i in list(self.call_history)[-self.window_size:])
+            pattern2 = tuple((t, str(i)) for t, i in list(self.call_history)[-(2*self.window_size):-self.window_size])
+            
+            if pattern1 == pattern2:
+                result["loop_detected"] = True
+                result["pattern_detected"] = True
+                result["message"] = f"Loop detectado: padrão de {self.window_size} chamadas se repetindo"
+                self.known_patterns.add(pattern1)
+                return result
+        
+        # Verificar frequência de chamadas (muito rápidas em sequência)
+        if len(self.tool_timestamps[tool_name]) >= 3:
+            recent_timestamps = self.tool_timestamps[tool_name][-3:]
+            if (recent_timestamps[-1] - recent_timestamps[0]) < 1.0:  # 3 chamadas em menos de 1 segundo
+                result["loop_detected"] = True
+                result["message"] = f"Chamadas de {tool_name} muito frequentes: 3 chamadas em menos de 1 segundo"
+                return result
+        
+        return result
+    
+    def reset(self):
+        """Reseta todos os contadores e históricos."""
+        self.tool_calls.clear()
+        self.total_calls = 0
+        self.call_history.clear()
+        self.tool_timestamps.clear()
+        self.known_patterns.clear()
+    
+    def get_call_statistics(self) -> Dict[str, Any]:
+        """Retorna estatísticas de chamadas para análise."""
+        return {
+            "total_calls": self.total_calls,
+            "tool_calls": dict(self.tool_calls),
+            "unique_tools": len(self.tool_calls),
+            "known_patterns": len(self.known_patterns),
+            "most_used_tool": max(self.tool_calls.items(), key=lambda x: x[1])[0] if self.tool_calls else None
+        }
+
+# Nova classe para memória de curto prazo
+class ShortTermMemory:
+    def __init__(self, max_items=20):
+        self.tool_results = deque(maxlen=max_items)  # Histórico de resultados
+        self.tool_inputs = {}  # Dicionário de inputs já usados por ferramenta
+        self.recent_observations = deque(maxlen=3)  # Observações recentes para prompt
+        self.successful_patterns = []  # Padrões de ações que foram bem-sucedidos
+        self.repeated_inputs = defaultdict(int)  # Contador de entradas repetidas
+    
+    def store_result(self, tool_name: str, tool_input: Any, result: str, success: bool = True):
+        """
+        Armazena o resultado de uma execução de ferramenta.
+        Identifica padrões repetidos e entradas duplicadas.
+        """
+        # Registrar a chamada no histórico
+        timestamp = time.time()
+        self.tool_results.append({
+            "tool": tool_name,
+            "input": tool_input,
+            "result": result[:500] if result else "",  # Limitar tamanho
+            "timestamp": timestamp,
+            "success": success
+        })
+        
+        # Armazenar observação recente para inclusão no prompt
+        self.recent_observations.append(f"{tool_name}({tool_input}): {result[:200] if result else ''}")
+        
+        # Verificar se essa entrada já foi usada antes com esta ferramenta
+        input_key = f"{tool_name}:{str(tool_input)}"
+        if input_key in self.tool_inputs:
+            self.repeated_inputs[input_key] += 1
+        else:
+            self.tool_inputs[input_key] = True
+        
+        # Identificar padrões bem-sucedidos (sequências de 2-3 chamadas)
+        if len(self.tool_results) >= 3 and success:
+            last_three = list(self.tool_results)[-3:]
+            if all(item.get("success", False) for item in last_three):
+                pattern = tuple((item["tool"], str(item["input"])) for item in last_three)
+                if pattern not in self.successful_patterns:
+                    self.successful_patterns.append(pattern)
+    
+    def has_seen_result(self, tool_name: str, tool_input: Any, result: str) -> bool:
+        """
+        Verifica se um resultado específico já foi visto.
+        Útil para evitar chamadas redundantes.
+        """
+        for item in self.tool_results:
+            if (item["tool"] == tool_name and 
+                str(item["input"]) == str(tool_input) and
+                item["result"] == result):
+                return True
+        return False
+    
+    def get_input_frequency(self, tool_name: str, tool_input: Any) -> int:
+        """Retorna quantas vezes um input específico foi usado com uma ferramenta."""
+        input_key = f"{tool_name}:{str(tool_input)}"
+        return self.repeated_inputs.get(input_key, 0)
+    
+    def get_similar_results(self, tool_name: str, current_result: str, threshold=0.7) -> List[Dict]:
+        """
+        Retorna resultados similares anteriores para a mesma ferramenta.
+        Pode ajudar a detectar situações onde o ambiente não muda entre chamadas.
+        """
+        similar_results = []
+        for item in self.tool_results:
+            if item["tool"] == tool_name:
+                # Implementação simples de similaridade (pode ser aprimorada)
+                # Verificar se há pelo menos 70% de sobreposição nas palavras
+                result1_words = set(current_result.lower().split())
+                result2_words = set(item["result"].lower().split())
+                if result1_words and result2_words:
+                    intersection = result1_words.intersection(result2_words)
+                    similarity = len(intersection) / max(len(result1_words), len(result2_words))
+                    if similarity >= threshold:
+                        similar_results.append(item)
+        return similar_results
+    
+    def get_memory_summary(self) -> str:
+        """
+        Retorna um resumo da memória de curto prazo para incluir no prompt.
+        """
+        if not self.tool_results:
+            return ""
+        
+        summary_parts = []
+        
+        # Adicionar observações recentes
+        if self.recent_observations:
+            summary_parts.append("Observações recentes:")
+            for obs in self.recent_observations:
+                summary_parts.append(f"- {obs}")
+        
+        # Adicionar padrões bem-sucedidos detectados
+        if self.successful_patterns:
+            summary_parts.append("\nPadrões bem-sucedidos:")
+            for pattern in self.successful_patterns[-2:]:  # Mostrar apenas os 2 mais recentes
+                pattern_str = " -> ".join([f"{t}({i})" for t, i in pattern])
+                summary_parts.append(f"- {pattern_str}")
+        
+        # Adicionar alerta sobre entradas repetidas
+        repeated = [(k, v) for k, v in self.repeated_inputs.items() if v > 1]
+        if repeated:
+            summary_parts.append("\nAtenção - Entradas repetidas:")
+            for key, count in sorted(repeated, key=lambda x: x[1], reverse=True)[:3]:
+                summary_parts.append(f"- {key}: usado {count} vezes")
+        
+        return "\n".join(summary_parts)
+    
+    def reset(self):
+        """Limpa todos os dados da memória."""
+        self.tool_results.clear()
+        self.tool_inputs.clear()
+        self.recent_observations.clear()
+        self.successful_patterns = []
+        self.repeated_inputs.clear()
+
+# Adicionar instâncias globais das classes de rastreamento
+tool_tracker = ToolExecutionTracker(max_consecutive_calls=3, max_total_calls=15, window_size=5)
+short_term_memory = ShortTermMemory(max_items=20)
 
 # Custom tool invocation and executor classes
 class ToolInvocation:
@@ -1071,7 +1287,7 @@ total_tool_calls = 0 # Contador total de chamadas
 
 def call_model(state: AgentState) -> dict:
     """Invokes the LLM to decide the next action or provide a final response."""
-    global llm_model, agent_tools_list_global, agent_prefix_prompt_global # Declarar que usaremos as globais
+    global llm_model, agent_tools_list_global, agent_prefix_prompt_global, tool_tracker, short_term_memory # Declarar que usaremos as globais
     print("---CALLING MODEL---")
     
     # Construir o scratchpad a partir do agent_outcome
@@ -1090,6 +1306,50 @@ def call_model(state: AgentState) -> dict:
 
     current_input = state["input"]
     
+    # Obter estatísticas de uso de ferramentas para meta-avaliação
+    stats = tool_tracker.get_call_statistics() if tool_tracker else {"total_calls": 0, "most_used_tool": "None"}
+    
+    # Obter resumo de memória de curto prazo
+    memory_summary = short_term_memory.get_memory_summary() if short_term_memory else ""
+    
+    # Adicionar seção de meta-avaliação quando houver indícios de loop ou uso excessivo de ferramentas
+    meta_evaluation = ""
+    if stats.get("total_calls", 0) > 5:
+        meta_evaluation = "\nMETA-AVALIAÇÃO DO SISTEMA:\n"
+        
+        # Detectar possíveis loops ou redundâncias
+        most_used = stats.get("most_used_tool", "")
+        loop_detected = tool_tracker.known_patterns if hasattr(tool_tracker, "known_patterns") else []
+        
+        if loop_detected:
+            meta_evaluation += "- ALERTA: Detectado possível loop no padrão de chamadas de ferramentas.\n"
+            meta_evaluation += "- Evite repetir as mesmas ações sem progresso.\n"
+            meta_evaluation += "- Considere avançar para a próxima etapa ou finalizar a tarefa.\n"
+        
+        if most_used and stats.get("tool_calls", {}).get(most_used, 0) > 2:
+            meta_evaluation += f"- Ferramenta mais usada: {most_used} ({stats.get('tool_calls', {}).get(most_used, 0)} vezes).\n"
+            
+            # Sugestões específicas para ferramentas comumente usadas em excesso
+            if most_used == "GitStatus":
+                meta_evaluation += "- RECOMENDAÇÃO: Se há arquivos modificados, faça o commit. Se não, prossiga com push ou finalize.\n"
+                meta_evaluation += "- Use GitAddCommit diretamente se já confirmou alterações a serem commitadas.\n"
+            elif most_used == "GitPush":
+                meta_evaluation += "- RECOMENDAÇÃO: Se o push falhou, verifique se há alterações não commitadas ou se há problemas de autenticação.\n"
+                meta_evaluation += "- Se o push foi bem-sucedido, é hora de finalizar a tarefa.\n"
+        
+        if stats.get("total_calls", 0) > 10:
+            meta_evaluation += f"- ALERTA: Total de {stats.get('total_calls')} chamadas de ferramentas - considere finalizar a tarefa.\n"
+            meta_evaluation += "- Se a tarefa principal foi concluída, forneça uma resposta final em vez de continuar usando ferramentas.\n"
+        
+        # Verificar se houve chamadas repetidas sem resultado diferente
+        if short_term_memory:
+            repeated_inputs = [(k, v) for k, v in short_term_memory.repeated_inputs.items() if v > 1]
+            if repeated_inputs:
+                meta_evaluation += "- ALERTA: Mesmos inputs usados múltiplas vezes, possivelmente sem progresso.\n"
+                for key, count in sorted(repeated_inputs, key=lambda x: x[1], reverse=True)[:2]:
+                    tool, input_val = key.split(":", 1)
+                    meta_evaluation += f"  * {tool}({input_val[:20]}...) - usado {count} vezes\n"
+    
     # Enhanced prompt for better reasoning
     # Add explicit guidance for the LLM to think through the request before taking action
     prompt_template = (
@@ -1101,6 +1361,8 @@ def call_model(state: AgentState) -> dict:
         "HISTORY OF PREVIOUS ACTIONS AND OBSERVATIONS (scratchpad):\n"
         "---------------------------------------------------------\n"
         "{agent_scratchpad}\n\n"
+        "{memory_summary}\n\n"
+        "{meta_evaluation}\n\n"
         "USER'S CURRENT REQUEST:\n"
         "-----------------------\n"
         "{input}\n\n"
@@ -1124,6 +1386,12 @@ def call_model(state: AgentState) -> dict:
         "- If a command is ambiguous, ask the user to be more specific\n"
         "- Provide suggestions when possible for what the user might have meant\n"
         "- If you detect multiple possible interpretations, list them clearly\n\n"
+        "LOOP PREVENTION GUIDELINES:\n"
+        "- If you've called the same tool more than twice without progress, try a different approach\n"
+        "- If GitStatus shows changes, commit them or explain why you're not committing\n"
+        "- If GitStatus shows clean working tree, either push or provide final response\n"
+        "- Finish the task when appropriate - don't continue using tools when the goal is achieved\n"
+        "- If you've been through several tool calls with similar results, summarize and conclude\n\n"
         "Thought:"
     )
 
@@ -1134,7 +1402,9 @@ def call_model(state: AgentState) -> dict:
         tools_description=tools_description,
         tool_names=tool_names,
         agent_scratchpad=scratchpad_content,
-        input=current_input
+        input=current_input,
+        memory_summary=memory_summary,
+        meta_evaluation=meta_evaluation
     )
 
     print(f"Generated prompt for LLM:\n{full_prompt_text[-1000:]}") # Mostra os últimos 1000 chars do prompt
@@ -1148,6 +1418,64 @@ def call_model(state: AgentState) -> dict:
 
         parsed_output = parse_llm_output(llm_output_text)
         thought_text = parsed_output.get("thought", llm_output_text if not parsed_output.get("type") == "action" else "") # Pega o pensamento ou o output bruto se não houver ação
+
+        # Verificar se temos um loop detectado com base na memória e histórico de repetição
+        if parsed_output["type"] == "action":
+            tool_name = parsed_output["tool_call"].tool
+            tool_input = parsed_output["tool_call"].tool_input if parsed_output["tool_call"].tool_input is not None else ""
+            
+            # Verificar na memória se esta ferramenta já foi chamada com este input várias vezes
+            if short_term_memory:
+                input_frequency = short_term_memory.get_input_frequency(tool_name, tool_input)
+                
+                # Se o mesmo comando foi chamado mais de 3 vezes, considere isso um loop
+                if input_frequency >= 3:
+                    print(f"LOOP DETECTADO: {tool_name}({tool_input}) chamado {input_frequency} vezes")
+                    
+                    # Tentar identificar um curso de ação mais apropriado
+                    if tool_name == "GitStatus":
+                        # Verificar os resultados anteriores para decidir próxima ação
+                        similar_results = short_term_memory.get_similar_results(tool_name, tool_input)
+                        repo_clean = any("nothing to commit" in result.get("result", "").lower() 
+                                        for result in similar_results)
+                        
+                        if repo_clean:
+                            # Se o repositório está limpo, fornecer resposta final
+                            parsed_output = {
+                                "type": "finish",
+                                "return_values": {
+                                    "output": "O repositório Git está limpo. Não há alterações para serem commitadas."
+                                },
+                                "thought": f"{thought_text}\n\nDetectei um loop nas chamadas GitStatus. O repositório está limpo."
+                            }
+                        else:
+                            # Se há alterações, sugerir GitAddCommit
+                            diff_summary = git_diff_summary_command("")
+                            commit_msg = generate_semantic_commit_message(diff_summary)
+                            
+                            parsed_output = {
+                                "type": "action",
+                                "tool_call": ToolInvocation(tool="GitAddCommit", tool_input=commit_msg),
+                                "thought": f"{thought_text}\n\nDetectei um loop nas chamadas GitStatus. Há alterações a serem commitadas."
+                            }
+                    elif tool_name == "GitPush":
+                        # Se está tentando push repetidamente, concluir a tarefa
+                        parsed_output = {
+                            "type": "finish",
+                            "return_values": {
+                                "output": "Push concluído ou tentado múltiplas vezes. A tarefa está completa."
+                            },
+                            "thought": f"{thought_text}\n\nDetectei um loop nas chamadas GitPush. Concluindo a tarefa."
+                        }
+                    else:
+                        # Qualquer outro caso de loop, fornecer resposta final
+                        parsed_output = {
+                            "type": "finish", 
+                            "return_values": {
+                                "output": f"Detectei um padrão de repetição nas chamadas de {tool_name}. A tarefa parece estar concluída ou estamos em um loop."
+                            },
+                            "thought": f"{thought_text}\n\nDetectei um loop nas chamadas de ferramentas. Concluindo a tarefa."
+                        }
 
         # If the LLM output contains indications of checking Git status or suggestions to commit first,
         # handle that explicitly to improve the agent's reasoning
@@ -1174,6 +1502,10 @@ def call_model(state: AgentState) -> dict:
             updated_state["agent_outcome"] = state["agent_outcome"] + [(AgentFinish(return_values=parsed_output["return_values"], log=f"Thought: {thought_text}\nFinal Answer: {final_output}"), final_output)]
             updated_state["final_response"] = final_output
             updated_state["next_action"] = None
+            
+            # Resetar os rastreadores quando concluir com sucesso
+            tool_tracker.reset()
+            short_term_memory.reset()
             
         elif parsed_output["type"] == "action":
             tool_call = parsed_output["tool_call"]
@@ -1238,7 +1570,7 @@ def call_model(state: AgentState) -> dict:
 
 def execute_tool_node(state: AgentState) -> dict:
     """Executes the tool specified in next_action and returns the observation."""
-    global tool_executor_global, tool_calls_counter, total_tool_calls, MAX_CONSECUTIVE_TOOL_CALLS, MAX_TOTAL_TOOL_CALLS
+    global tool_executor_global, tool_tracker, short_term_memory
     print("---EXECUTING TOOL NODE---")
     action_to_execute = state.get("next_action") # Renomeado para evitar conflito com AgentAction import
 
@@ -1258,243 +1590,43 @@ def execute_tool_node(state: AgentState) -> dict:
             "error_category": ErrorCategory.EXECUTION
         }
 
-    # Incrementar contadores para controle de limite de chamadas
+    # Registrar a chamada no sistema de rastreamento e verificar limites
     tool_name = action_to_execute.tool
-    total_tool_calls += 1
+    tool_input = action_to_execute.tool_input if action_to_execute.tool_input else ""
+    tracking_result = tool_tracker.record_call(tool_name, tool_input)
     
-    # Incrementar contador específico para essa ferramenta
-    if tool_name not in tool_calls_counter:
-        tool_calls_counter[tool_name] = 1
-    else:
-        tool_calls_counter[tool_name] += 1
-    
-    # Verificar se atingiu o limite máximo de chamadas totais
-    if total_tool_calls > MAX_TOTAL_TOOL_CALLS:
-        print(f"LIMITE DE CHAMADAS EXCEDIDO: Total de {total_tool_calls} chamadas > limite de {MAX_TOTAL_TOOL_CALLS}")
-        return {
-            "agent_outcome": state["agent_outcome"] + [(f"LIMITE DE CHAMADAS EXCEDIDO ({total_tool_calls})", "")],
-            "next_action": None,
-            "final_response": f"Desculpe, mas estou detectando um padrão de repetição nas chamadas de ferramentas. Parece que completamos a tarefa ou estamos em um loop. Até agora executei {total_tool_calls} ações.",
-            "error": False,
-            "error_message": None,
-            "error_category": ErrorCategory.NONE,
-            "needs_clarification": False,
-            "clarification_question": None,
-            "suggested_corrections": []
-        }
-    
-    # Verificar se atingiu o limite máximo para essa ferramenta específica
-    if tool_calls_counter[tool_name] > MAX_CONSECUTIVE_TOOL_CALLS:
-        print(f"LIMITE EXCEDIDO PARA {tool_name}: {tool_calls_counter[tool_name]} chamadas > limite de {MAX_CONSECUTIVE_TOOL_CALLS}")
+    # Se ultrapassou algum limite ou detectou loop, processar o resultado especial
+    if tracking_result["exceeded_limit"] or tracking_result["loop_detected"]:
+        print(f"ALERTA: {tracking_result['message']}")
         
-        # Para o caso do GitStatus, forçar a transição para GitAddCommit ou simplesmente finalizar
-        if tool_name == "GitStatus":
-            status_result = git_status_command("")
-            if "modified:" in status_result or "Changes not staged for commit" in status_result:
-                # Forçar GitAddCommit se há mudanças não commitadas
-                diff_summary = git_diff_summary_command("")
-                commit_msg = "feat: update files detected by diff analysis"
-                
-                # Extrair nomes de arquivos
-                files_pattern = re.findall(r"modified:\s+([^\n]+)", status_result)
-                if files_pattern:
-                    files_context = ", ".join(file.strip() for file in files_pattern)
-                    commit_msg = f"feat: update {files_context} (auto-detected)"
-                
-                print(f"Forçando GitAddCommit com mensagem: {commit_msg}")
-                return {
-                    "agent_outcome": state["agent_outcome"] + [(f"LIMITE EXCEDIDO PARA {tool_name}: FORÇANDO GitAddCommit", "")],
-                    "next_action": ToolInvocation(tool="GitAddCommit", tool_input=commit_msg),
-                    "final_response": None,
-                    "error": False,
-                    "error_message": None,
-                    "error_category": ErrorCategory.NONE,
-                    "needs_clarification": False,
-                    "clarification_question": None,
-                    "suggested_corrections": []
-                }
-            else:
-                # Se não há mudanças para commitar, encerrar com status limpo
-                return {
-                    "agent_outcome": state["agent_outcome"] + [(f"LIMITE EXCEDIDO PARA {tool_name}: STATUS LIMPO", "")],
-                    "next_action": None,
-                    "final_response": "O repositório está limpo. Não há alterações para commitar e todos os arquivos estão atualizados.",
-                    "error": False,
-                    "error_message": None,
-                    "error_category": ErrorCategory.NONE,
-                    "needs_clarification": False,
-                    "clarification_question": None,
-                    "suggested_corrections": []
-                }
-        
-        # Para o caso do GitPush, finalizar com mensagem de conclusão
-        elif tool_name == "GitPush":
-            return {
-                "agent_outcome": state["agent_outcome"] + [(f"LIMITE EXCEDIDO PARA {tool_name}: FINALIZANDO", "")],
-                "next_action": None,
-                "final_response": "O push foi concluído com sucesso. Se houver alguma outra ação que você gostaria de realizar, por favor informe.",
-                "error": False,
-                "error_message": None,
-                "error_category": ErrorCategory.NONE,
-                "needs_clarification": False,
-                "clarification_question": None,
-                "suggested_corrections": []
-            }
-        
-        # Para outros casos, fornecer uma resposta genérica de conclusão
-        return {
-            "agent_outcome": state["agent_outcome"] + [(f"LIMITE EXCEDIDO PARA {tool_name}", "")],
-            "next_action": None,
-            "final_response": f"Detectei uma possível repetição nas chamadas da ferramenta {tool_name}. A tarefa pode ter sido concluída com sucesso ou estamos em um loop. Por favor, se precisar de mais algo, forneça uma nova instrução.",
-            "error": False,
-            "error_message": None,
-            "error_category": ErrorCategory.NONE,
-            "needs_clarification": False,
-            "clarification_question": None,
-            "suggested_corrections": []
-        }
-
-    # Handle empty or None inputs explicitly
-    tool_input = action_to_execute.tool_input
-    if tool_input is None:
-        tool_input = ""
-    
-    # For GitPush with empty input, ensure it's really empty
-    if action_to_execute.tool == "GitPush" and (not tool_input or tool_input.strip() in ["''", '""', "empty", "empty string", "(empty string)"]):
-        tool_input = ""
-        action_to_execute = ToolInvocation(tool=action_to_execute.tool, tool_input=tool_input)
-    
-    # For GitStatus, enhance the response to provide clearer information about repository state
-    if action_to_execute.tool == "GitStatus":
-        print("Enhanced GitStatus check for better repository state reporting.")
-    
-    # Improved loop detection logic
-    duplicate_call_count = 0
-    consecutive_same_tool = 0
-    if len(state["agent_outcome"]) >= 2:  # Need at least a few actions to check for duplicates
-        # Count how many times this exact tool has been called in total
-        tool_history = [item[0].tool if isinstance(item, tuple) and isinstance(item[0], AgentAction) else None 
-                      for item in state["agent_outcome"]]
-        duplicate_call_count = tool_history.count(action_to_execute.tool)
-        
-        # Count consecutive calls of the same tool
-        consecutive_count = 0
-        for i in range(len(tool_history) - 1, -1, -1):
-            if tool_history[i] == action_to_execute.tool:
-                consecutive_count += 1
-            else:
-                break
-        consecutive_same_tool = consecutive_count
-        
-        # Enhanced loop detection and logging
-        if duplicate_call_count >= 3 or consecutive_same_tool >= 2:
-            duplicate_call = True
-            print(f"Warning: Tool {action_to_execute.tool} has been called repeatedly (total: {duplicate_call_count}, consecutive: {consecutive_same_tool})")
-        else:
-            duplicate_call = False
-    else:
-        duplicate_call = False
-    
-    print(f"Executing tool: {action_to_execute.tool} with input: {tool_input}")
-    updated_agent_outcome = list(state["agent_outcome"]) # Criar cópia para modificar
-    
-    try:
-        # More robust loop prevention logic for GitStatus → GitAddCommit transition
-        # Reduzir o limite para detecção de loop e acionar a transição
-        if action_to_execute.tool == "GitStatus" and (duplicate_call_count >= 1 or consecutive_same_tool >= 1):
-            # Check if there are references to changes in files in previous observations
-            changes_detected = False
-            commit_context = ""
+        # Verificar se já vimos resultados similares para essa ferramenta
+        if len(state["agent_outcome"]) > 0:
+            # Tentar encontrar a última chamada e resultado para essa ferramenta
+            last_observation = None
+            for outcome in reversed(state["agent_outcome"]):
+                if isinstance(outcome, tuple) and len(outcome) == 2:
+                    action, observation = outcome
+                    if isinstance(action, AgentAction) and action.tool == tool_name:
+                        last_observation = observation
+                        break
             
-            # Scan the last 3 observations for file change information
-            for i in range(min(3, len(state["agent_outcome"]))):
-                if i < len(state["agent_outcome"]) and isinstance(state["agent_outcome"][-i-1], tuple) and len(state["agent_outcome"][-i-1]) == 2:
-                    last_observation = str(state["agent_outcome"][-i-1][1]) if state["agent_outcome"][-i-1][1] is not None else ""
-                    if "modified:" in last_observation or "Changes not staged for commit" in last_observation:
-                        changes_detected = True
-                        # Try to extract file names for context
-                        files_pattern = re.findall(r"modified:\s+([^\n]+)", last_observation)
-                        if files_pattern:
-                            commit_context = ", ".join(file.strip() for file in files_pattern)
-            
-            if changes_detected:
-                if "commit" in state["input"].lower():
-                    # Special handling for 'commit with diff context' requests
-                    if "diff" in state["input"].lower() or "base" in state["input"].lower() and "context" in state["input"].lower():
-                        # Use GitDiffSummary to get details of changes for commit message
-                        print("Automatic diff analysis for intelligent commit message generation")
+            # Se temos um resultado anterior, verificar memória de curto prazo
+            if last_observation and short_term_memory.has_seen_result(tool_name, tool_input, last_observation):
+                print(f"Resultado similar já foi observado anteriormente para {tool_name}({tool_input})")
+                
+                # Caso especial para o GitStatus - tentar avançar para commit ou finalizar
+                if tool_name == "GitStatus":
+                    status_result = git_status_command("")
+                    if "modified:" in status_result or "Changes not staged for commit" in status_result:
+                        # Forçar GitAddCommit se há mudanças não commitadas
                         diff_summary = git_diff_summary_command("")
+                        commit_msg = generate_semantic_commit_message(diff_summary)
                         
-                        # Generate commit message based on diff contents
-                        commit_msg = f"Update {commit_context or 'files'}"
-                        
-                        # Extract key changes from diff to enhance commit message
-                        key_changes = []
-                        
-                        # Look for descriptive patterns in the diff output
-                        if "function" in diff_summary.lower() or "def " in diff_summary.lower():
-                            key_changes.append("function implementation")
-                        if "class" in diff_summary.lower():
-                            key_changes.append("class definition")
-                        if "import" in diff_summary.lower():
-                            key_changes.append("imports")
-                        if "fix" in diff_summary.lower() or "bug" in diff_summary.lower():
-                            key_changes.append("bug fixes")
-                        if "comment" in diff_summary.lower():
-                            key_changes.append("comments")
-                        if "refactor" in diff_summary.lower():
-                            key_changes.append("code refactoring")
-                        if "error" in diff_summary.lower():
-                            key_changes.append("error handling") 
-                        if "enum" in diff_summary.lower() or "ErrorCategory" in diff_summary:
-                            key_changes.append("error categorization")
-                        
-                        # Buscar padrões do commit message semânticos
-                        if "feat" in state["input"].lower() or "feature" in state["input"].lower():
-                            commit_prefix = "feat"
-                        elif "fix" in state["input"].lower():
-                            commit_prefix = "fix"
-                        elif "docs" in state["input"].lower() or "documentation" in state["input"].lower():
-                            commit_prefix = "docs"
-                        elif "style" in state["input"].lower():
-                            commit_prefix = "style"
-                        elif "refactor" in state["input"].lower():
-                            commit_prefix = "refactor"
-                        elif "perf" in state["input"].lower() or "performance" in state["input"].lower():
-                            commit_prefix = "perf"
-                        elif "test" in state["input"].lower():
-                            commit_prefix = "test"
-                        elif "chore" in state["input"].lower():
-                            commit_prefix = "chore"
-                        else:
-                            commit_prefix = "feat"
-                        
-                        # Make a compact, descriptive commit message
-                        if key_changes:
-                            commit_msg = f"{commit_prefix}: {', '.join(key_changes)} in {commit_context or 'files'}"
-                        
-                        # Check for specific file types to make message more relevant
-                        if ".py" in diff_summary:
-                            if not key_changes:
-                                commit_msg = f"{commit_prefix}: update Python implementation in {commit_context or 'files'}"
-                        elif ".md" in diff_summary:
-                            commit_msg = f"{commit_prefix}: update documentation in {commit_context or 'files'}"
-                        elif ".json" in diff_summary or ".yaml" in diff_summary or ".yml" in diff_summary:
-                            commit_msg = f"{commit_prefix}: update configuration in {commit_context or 'files'}"
-                        
-                        # Add the observation with diff information
-                        observation = f"Repository status checked. Changes detected in {commit_context or 'the repository'}. Performing detailed diff analysis to create commit message."
-                        print(f"Tool Observation (intelligent commit): {observation}")
-                        
-                        if updated_agent_outcome:
-                            last_outcome_item = updated_agent_outcome[-1]
-                            if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
-                                updated_agent_outcome[-1] = (last_outcome_item[0], f"{observation}\n\n{diff_summary[:500]}...")
-                            else:
-                                updated_agent_outcome.append((f"DiffAnalysisFor_{action_to_execute.tool}", f"{observation}\n\n{diff_summary[:500]}..."))
+                        print(f"Meta-avaliação: Detectou loop em GitStatus com arquivos modificados.")
+                        print(f"Ação sugerida: GitAddCommit com mensagem: {commit_msg}")
                         
                         return {
-                            "agent_outcome": updated_agent_outcome,
+                            "agent_outcome": state["agent_outcome"] + [(f"LOOP_META_AVALIAÇÃO: Detectado loop em GitStatus com arquivos modificados", "")],
                             "next_action": ToolInvocation(tool="GitAddCommit", tool_input=commit_msg),
                             "final_response": None,
                             "error": False,
@@ -1504,64 +1636,29 @@ def execute_tool_node(state: AgentState) -> dict:
                             "clarification_question": None,
                             "suggested_corrections": []
                         }
-                    
-                    # If the user specifically asked to commit (general case without diff context request)
-                    observation = f"Repository status checked. Changes detected in {commit_context or 'the repository'}. Proceeding to commit."
-                    print(f"Tool Observation (loop prevention): {observation}")
-                    
-                    # Add the observation for GitStatus
-                    if updated_agent_outcome:
-                        last_outcome_item = updated_agent_outcome[-1]
-                        if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
-                            updated_agent_outcome[-1] = (last_outcome_item[0], str(observation))
-                        else:
-                            updated_agent_outcome.append((f"LoopPreventionFor_{action_to_execute.tool}", str(observation)))
-                    
-                    # Force transition to GitAddCommit with a suggested message
-                    commit_msg = f"Update {commit_context or 'files'}" 
-                    
-                    # If there is more context in the user input, try to use it
-                    if "based in" in state["input"].lower() or "based on" in state["input"].lower():
-                        if commit_context:
-                            # Forçar geração de commit semântico quando pedido explicitamente
-                            print("Generating semantic commit message from diff...")
-                            try:
-                                # Call GitDiffSummary inside this execution to get diff details
-                                diff_summary = git_diff_summary_command("")
-                                
-                                # Extract file names for context
-                                files_pattern = re.findall(r"modified:\s+([^\n]+)", diff_summary)
-                                if files_pattern:
-                                    commit_files = ", ".join(file.strip() for file in files_pattern)
-                                else:
-                                    commit_files = commit_context
-                                    
-                                # Extract types of changes
-                                key_changes = []
-                                if "enum" in diff_summary.lower() or "ErrorCategory" in diff_summary:
-                                    key_changes.append("error categorization")
-                                if "function" in diff_summary.lower() or "def " in diff_summary.lower():
-                                    key_changes.append("function implementations")
-                                if "class" in diff_summary.lower():
-                                    key_changes.append("class definitions")
-                                if "import" in diff_summary.lower():
-                                    key_changes.append("imports")
-                                
-                                # Create a semantic commit message
-                                if key_changes:
-                                    commit_msg = f"feat: add {', '.join(key_changes)} to {commit_files}"
-                                else:
-                                    commit_msg = f"feat: update {commit_files} with changes from diff"
-                            except Exception as e:
-                                print(f"Error generating semantic commit: {e}")
-                                commit_msg = f"feat: update {commit_context or 'code'} from diff analysis"
-                        else:
-                            commit_msg = f"Update {commit_context or 'files'}"
-                    
+                    else:
+                        # Se não há mudanças, finalizar com status limpo
+                        print(f"Meta-avaliação: Detectou loop em GitStatus com repositório limpo.")
+                        
+                        return {
+                            "agent_outcome": state["agent_outcome"] + [(f"LOOP_META_AVALIAÇÃO: Detectado loop em GitStatus com repositório limpo", "")],
+                            "next_action": None,
+                            "final_response": "O repositório está limpo. Não há alterações para commitar e todos os arquivos estão atualizados.",
+                            "error": False,
+                            "error_message": None,
+                            "error_category": ErrorCategory.NONE,
+                            "needs_clarification": False,
+                            "clarification_question": None,
+                            "suggested_corrections": []
+                        }
+                
+                # Caso especial para GitPush - apenas finalizar
+                elif tool_name == "GitPush":
+                    print(f"Meta-avaliação: Detectou loop em GitPush.")
                     return {
-                        "agent_outcome": updated_agent_outcome,
-                        "next_action": ToolInvocation(tool="GitAddCommit", tool_input=commit_msg),
-                        "final_response": None,
+                        "agent_outcome": state["agent_outcome"] + [(f"LOOP_META_AVALIAÇÃO: Detectado loop em GitPush", "")],
+                        "next_action": None,
+                        "final_response": "Push concluído com sucesso. Se houver mais mudanças, elas foram enviadas para o repositório remoto.",
                         "error": False,
                         "error_message": None,
                         "error_category": ErrorCategory.NONE,
@@ -1569,86 +1666,14 @@ def execute_tool_node(state: AgentState) -> dict:
                         "clarification_question": None,
                         "suggested_corrections": []
                     }
-                elif "push" in state["input"].lower():
-                    # If the user wants to push but we need to commit first
-                    observation = f"Repository status checked. Changes detected in {commit_context or 'the repository'}. Need to commit before pushing."
-                    print(f"Tool Observation (loop prevention): {observation}")
                     
-                    # Add the observation for GitStatus
-                    if updated_agent_outcome:
-                        last_outcome_item = updated_agent_outcome[-1]
-                        if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
-                            updated_agent_outcome[-1] = (last_outcome_item[0], str(observation))
-                        else:
-                            updated_agent_outcome.append((f"LoopPreventionFor_{action_to_execute.tool}", str(observation)))
-                    
-                    return {
-                        "agent_outcome": updated_agent_outcome,
-                        "next_action": None,
-                        "final_response": f"Existem alterações não commitadas em {commit_context or 'arquivos do repositório'}. Você precisa fazer o commit antes de fazer o push. Gostaria que eu fizesse o commit para você?",
-                        "error": False,
-                        "error_message": None,
-                        "error_category": ErrorCategory.NONE,
-                        "needs_clarification": True,
-                        "clarification_question": f"Existem alterações não commitadas em {commit_context or 'arquivos do repositório'}. Gostaria que eu fizesse o commit antes de fazer o push?",
-                        "suggested_corrections": []
-                    }
+                # Para qualquer outra ferramenta em loop, fornecer informações e finalizar
                 else:
-                    # Generic case: just report the changes and ask for next action
-                    observation = f"Repository status checked. Changes detected in {commit_context or 'the repository'}."
-                    print(f"Tool Observation (loop prevention): {observation}")
-                    
-                    # Add the observation for GitStatus
-                    if updated_agent_outcome:
-                        last_outcome_item = updated_agent_outcome[-1]
-                        if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
-                            updated_agent_outcome[-1] = (last_outcome_item[0], str(observation))
-                        else:
-                            updated_agent_outcome.append((f"LoopPreventionFor_{action_to_execute.tool}", str(observation)))
-                    
+                    print(f"Meta-avaliação: Detectou loop genérico em {tool_name}.")
                     return {
-                        "agent_outcome": updated_agent_outcome,
+                        "agent_outcome": state["agent_outcome"] + [(f"LOOP_META_AVALIAÇÃO: Detectado loop genérico em {tool_name}", "")],
                         "next_action": None,
-                        "final_response": f"Encontrei alterações não commitadas em {commit_context or 'arquivos do repositório'}. Gostaria de fazer o commit dessas alterações?",
-                        "error": False,
-                        "error_message": None,
-                        "error_category": ErrorCategory.NONE,
-                        "needs_clarification": True,
-                        "clarification_question": f"Encontrei alterações não commitadas em {commit_context or 'arquivos do repositório'}. O que você gostaria de fazer em seguida?",
-                        "suggested_corrections": []
-                    }
-            else:
-                # No changes detected, branch is clean
-                observation = "Repository status checked. No changes detected, working tree clean."
-                print(f"Tool Observation (loop prevention): {observation}")
-                
-                # Add the observation for GitStatus
-                if updated_agent_outcome:
-                    last_outcome_item = updated_agent_outcome[-1]
-                    if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
-                        updated_agent_outcome[-1] = (last_outcome_item[0], str(observation))
-                    else:
-                        updated_agent_outcome.append((f"LoopPreventionFor_{action_to_execute.tool}", str(observation)))
-                
-                # If user wanted to commit but there's nothing to commit
-                if "commit" in state["input"].lower():
-                    return {
-                        "agent_outcome": updated_agent_outcome,
-                        "next_action": None,
-                        "final_response": "Não há alterações para commitar. O repositório está limpo.",
-                        "error": False,
-                        "error_message": None,
-                        "error_category": ErrorCategory.NONE,
-                        "needs_clarification": False,
-                        "clarification_question": None,
-                        "suggested_corrections": []
-                    }
-                # If user wanted to push, we can proceed with push
-                elif "push" in state["input"].lower():
-                    return {
-                        "agent_outcome": updated_agent_outcome,
-                        "next_action": ToolInvocation(tool="GitPush", tool_input=""),
-                        "final_response": None,
+                        "final_response": f"Detectei uma possível repetição com a ferramenta {tool_name}. A tarefa parece estar completa ou estamos em um loop sem progresso. Posso ajudar com algo diferente?",
                         "error": False,
                         "error_message": None,
                         "error_category": ErrorCategory.NONE,
@@ -1657,48 +1682,18 @@ def execute_tool_node(state: AgentState) -> dict:
                         "suggested_corrections": []
                     }
         
-        # Normal tool execution
-        observation = tool_executor_global.invoke(action_to_execute)
-        print(f"Tool Observation: {observation}")
-
-        # Analisa a resposta da ferramenta para detectar situações que exigem esclarecimento
-        needs_clarification = False
-        clarification_question = None
-        
-        # Enhanced response processing for Git tools
-        if action_to_execute.tool == "GitPush":
-            if "uncommitted changes" in observation:
-                # Convert this into a more explicit question for the user about committing
-                observation = f"{observation} Gostaria que eu fizesse o commit dessas alterações antes de fazer o push?"
-                needs_clarification = True
-                clarification_question = "Existem alterações não commitadas. Você gostaria de fazer o commit antes do push?"
-            elif "already up to date" in observation.lower():
-                # Provide a clearer confirmation for up-to-date branches
-                observation = f"{observation} Sua branch já está sincronizada com o remote."
-            elif "Total" in observation and ("compressed" in observation or "delta" in observation):
-                # Successful push with stats
-                observation = f"Push realizado com sucesso: {observation}"
-            elif "authenticity" in observation and "can't be established" in observation:
-                # SSH key verification prompt
-                observation = f"Autenticação SSH necessária: {observation}"
-                needs_clarification = True
-                clarification_question = "É necessário verificar a autenticidade do host. Deseja continuar com a conexão?"
-        
-        # Handle GitAddCommit results more explicitly
-        if action_to_execute.tool == "GitAddCommit":
-            # If the commit was successful, provide immediate feedback and exit
-            if "Commit successful" in observation or "files changed" in observation:
-                if updated_agent_outcome:
-                    last_outcome_item = updated_agent_outcome[-1]
-                    if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
-                        updated_agent_outcome[-1] = (last_outcome_item[0], str(observation))
-                    else:
-                        updated_agent_outcome.append((f"ToolObservationFor_{action_to_execute.tool}", str(observation)))
+        # Se temos uma ação sugerida pelo rastreador
+        if tracking_result["suggested_action"] and tracking_result["suggested_action"] != "FINISH":
+            if tracking_result["suggested_action"] == "GitAddCommit":
+                # Gerar mensagem de commit com base nas alterações
+                diff_summary = git_diff_summary_command("")
+                commit_msg = generate_semantic_commit_message(diff_summary)
                 
+                print(f"Recomendando GitAddCommit após limite de {tool_name}")
                 return {
-                    "agent_outcome": updated_agent_outcome,
-                    "next_action": None,
-                    "final_response": f"Alterações commitadas com sucesso: {observation}",
+                    "agent_outcome": state["agent_outcome"] + [(f"META_SUGESTÃO: Limite excedido para {tool_name}, executando GitAddCommit", "")],
+                    "next_action": ToolInvocation(tool="GitAddCommit", tool_input=commit_msg),
+                    "final_response": None,
                     "error": False,
                     "error_message": None,
                     "error_category": ErrorCategory.NONE,
@@ -1706,97 +1701,206 @@ def execute_tool_node(state: AgentState) -> dict:
                     "clarification_question": None,
                     "suggested_corrections": []
                 }
-            # If nothing to commit, also provide immediate feedback and exit
-            elif "Nothing to commit" in observation or "already been committed" in observation:
-                if updated_agent_outcome:
-                    last_outcome_item = updated_agent_outcome[-1]
-                    if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
-                        updated_agent_outcome[-1] = (last_outcome_item[0], str(observation))
-                    else:
-                        updated_agent_outcome.append((f"ToolObservationFor_{action_to_execute.tool}", str(observation)))
-                
-                return {
-                    "agent_outcome": updated_agent_outcome,
-                    "next_action": None,
-                    "final_response": f"Não há alterações para commitar: {observation}",
-                    "error": False,
-                    "error_message": None,
-                    "error_category": ErrorCategory.NONE,
-                    "needs_clarification": False,
-                    "clarification_question": None,
-                    "suggested_corrections": []
-                }
-        
-        # Detectar erros de permissão
-        if "permissão" in observation.lower() or "permission denied" in observation.lower():
-            error_category = ErrorCategory.PERMISSION
-        # Detectar erros de comando não encontrado
-        elif "comando não foi encontrado" in observation.lower() or "command not found" in observation.lower():
-            error_category = ErrorCategory.COMMAND_NOT_FOUND
-        # Detectar erros de rede
-        elif "could not resolve host" in observation.lower() or "falha na conexão" in observation.lower() or "connection failed" in observation.lower():
-            error_category = ErrorCategory.NETWORK
-        else:
-            error_category = ErrorCategory.NONE
-        
-        if updated_agent_outcome:
-            last_outcome_item = updated_agent_outcome[-1]
-            if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
-                # Atualiza a observação para a AgentAction correspondente
-                updated_agent_outcome[-1] = (last_outcome_item[0], str(observation))
-            else:
-                # Fallback: adiciona a observação como um novo item (menos ideal, indica problema na lógica anterior)
-                updated_agent_outcome.append((f"UnexpectedObservationFor_{action_to_execute.tool}", str(observation)))
-                print(f"Warning: Added observation for {action_to_execute.tool} as a new item, check agent_outcome structure.")
-        else:
-             # Fallback extremo: agent_outcome estava vazio, o que não deveria ocorrer após call_model
-             updated_agent_outcome.append((f"DirectObservationFor_{action_to_execute.tool}", str(observation)))
-             print("Warning: agent_outcome was empty before adding tool observation. This is unexpected.")
-
-        # If we're asking the user about uncommitted changes, let's format it as a final response
-        if action_to_execute.tool == "GitPush" and "uncommitted changes" in observation:
+        elif tracking_result["suggested_action"] == "FINISH" or tracking_result["loop_detected"]:
+            # Finalizar execução
+            print(f"Finalizando após detectar limite/loop em {tool_name}")
+            stats = tool_tracker.get_call_statistics()
+            
             return {
-                "agent_outcome": updated_agent_outcome,
+                "agent_outcome": state["agent_outcome"] + [(f"META_DECISÃO: Limite/loop detectado em {tool_name}, finalizando", "")],
                 "next_action": None,
-                "final_response": observation,  # Directly return the observation about uncommitted changes
+                "final_response": f"Detectei um possível loop ou limite excedido na execução de {tool_name}. Foram executadas {stats['total_calls']} ações no total. A tarefa parece estar concluída ou estamos em um loop sem progresso.",
                 "error": False,
                 "error_message": None,
-                "error_category": ErrorCategory.NONE,
-                "needs_clarification": needs_clarification,
-                "clarification_question": clarification_question,
-                "suggested_corrections": []
-            }
-        # For successful push operations with a clear message 
-        elif action_to_execute.tool == "GitPush" and ("already up to date" in observation.lower() or "successfully pushed" in observation.lower()):
-            return {
-                "agent_outcome": updated_agent_outcome,
-                "next_action": None,
-                "final_response": observation,  # Directly return the confirmation
-                "error": False,
-                "error_message": None,
-                "error_category": ErrorCategory.NONE,
+                "error_category": ErrorCategory.LOOP_DETECTED,
                 "needs_clarification": False,
                 "clarification_question": None,
                 "suggested_corrections": []
             }
-        # Otherwise, continue with normal tool execution flow
-        else:
-            return {
-                "agent_outcome": updated_agent_outcome,
-                "next_action": None, # Limpa a ação após execução
-                "final_response": None, # Garante que não haja resposta final neste passo
-                "error": False,
-                "error_message": None,
-                "error_category": error_category,
-                "needs_clarification": needs_clarification,
-                "clarification_question": clarification_question,
-                "suggested_corrections": []
-            }
-    except Exception as e:
-        error_msg = f"Error executing tool {action_to_execute.tool}: {str(e)}"
-        print(error_msg)
-        
-        if updated_agent_outcome:
+    
+    # Para GitStatus, verifica se já temos resultado similar em memória
+    if tool_name == "GitStatus" and len(short_term_memory.tool_results) > 0:
+        # Verificar se já foi chamado mais de uma vez sem mudanças significativas
+        repeated_call_count = short_term_memory.get_input_frequency(tool_name, tool_input)
+        if repeated_call_count > 1:
+            # Check if repo is clean
+            status_result = git_status_command("")
+            if "nothing to commit" in status_result.lower() or "working tree clean" in status_result.lower():
+                print("Meta-avaliação: GitStatus chamado múltiplas vezes em repositório limpo")
+                return {
+                    "agent_outcome": state["agent_outcome"] + [(AgentAction(tool=tool_name, tool_input=tool_input, log=f"Action: {tool_name}\nAction Input: {tool_input}"), status_result + "\n(META: Repositório limpo, não há necessidade de commit)")],
+                    "next_action": None,
+                    "final_response": "O repositório Git está limpo e atualizado. Não há alterações para commitar.",
+                    "error": False,
+                    "error_message": None,
+                    "error_category": ErrorCategory.NONE,
+                    "needs_clarification": False,
+                    "clarification_question": None,
+                    "suggested_corrections": []
+                }
+    
+    # Handle empty or None inputs explicitly
+    if tool_input is None:
+        tool_input = ""
+    
+    # For GitPush with empty input, ensure it's really empty
+    if action_to_execute.tool == "GitPush" and (not tool_input or tool_input.strip() in ["''", '""', "empty", "empty string", "(empty string)"]):
+        tool_input = ""
+        action_to_execute = ToolInvocation(tool=action_to_execute.tool, tool_input=tool_input)
+    
+    print(f"Executing tool: {action_to_execute.tool} with input: {tool_input}")
+    updated_agent_outcome = list(state["agent_outcome"]) # Criar cópia para modificar
+    
+    # Find the last AgentAction in agent_outcome for this tool call and update it
+    # The action was added by call_model, but without observation
+    found_action = False
+    for i in range(len(updated_agent_outcome) - 1, -1, -1):
+        outcome_item = updated_agent_outcome[i]
+        if isinstance(outcome_item, tuple) and len(outcome_item) == 2:
+            action, observation = outcome_item
+            if isinstance(action, AgentAction) and observation is None:
+                # Este é o item a atualizar
+                found_action = True
+                
+                try:
+                    if tool_executor_global and tool_executor_global.tools_dict.get(action_to_execute.tool):
+                        start_time = time.time()
+                        observation = tool_executor_global.invoke(action_to_execute)
+                        execution_time = time.time() - start_time
+                        print(f"Tool {action_to_execute.tool} executed in {execution_time:.2f}s")
+                        
+                        # Armazenar resultado na memória de curto prazo
+                        short_term_memory.store_result(
+                            tool_name=action_to_execute.tool, 
+                            tool_input=tool_input, 
+                            result=observation,
+                            success=True
+                        )
+                        
+                        # Adicionar informações de meta-avaliação para GitStatus
+                        if action_to_execute.tool == "GitStatus":
+                            # Analisar o resultado para dar melhores orientações
+                            meta_info = ""
+                            if "nothing to commit" in observation.lower() or "working tree clean" in observation.lower():
+                                meta_info = "\n(META: Repositório limpo, pronto para push se necessário)"
+                            elif "modified:" in observation:
+                                meta_info = "\n(META: Arquivos modificados detectados, recomenda-se commit)"
+                            elif "Your branch is ahead" in observation:
+                                meta_info = "\n(META: Branch local à frente da remota, recomenda-se push)"
+                            
+                            observation = observation + meta_info
+                        
+                        # Atualizar o item do outcome com a observação
+                        updated_agent_outcome[i] = (action, observation)
+                        break
+                    else:
+                        observation = f"Error: Tool '{action_to_execute.tool}' not found in tool_executor. Available tools: {list(tool_executor_global.tools_dict.keys()) if tool_executor_global else 'None'}"
+                        updated_agent_outcome[i] = (action, observation)
+                        
+                        # Registrar falha na memória de curto prazo
+                        short_term_memory.store_result(
+                            tool_name=action_to_execute.tool, 
+                            tool_input=tool_input, 
+                            result=observation,
+                            success=False
+                        )
+                        
+                        # Retornar erro para o fluxo principal
+                        return {
+                            "agent_outcome": updated_agent_outcome,
+                            "next_action": None,
+                            "final_response": None,
+                            "error": True,
+                            "error_message": observation,
+                            "error_category": ErrorCategory.EXECUTION,
+                            "needs_clarification": False,
+                            "clarification_question": None,
+                            "suggested_corrections": []
+                        }
+                except Exception as e:
+                    error_msg = f"Error executing tool '{action_to_execute.tool}': {str(e)}"
+                    print(error_msg)
+                    observation = f"ToolExecutionError: {error_msg}"
+                    updated_agent_outcome[i] = (action, observation)
+                    
+                    # Registrar falha na memória de curto prazo
+                    short_term_memory.store_result(
+                        tool_name=action_to_execute.tool, 
+                        tool_input=tool_input, 
+                        result=error_msg,
+                        success=False
+                    )
+                    
+                    # Retornar erro para o fluxo principal
+                    return {
+                        "agent_outcome": updated_agent_outcome,
+                        "next_action": None,
+                        "final_response": None,
+                        "error": True,
+                        "error_message": error_msg,
+                        "error_category": ErrorCategory.EXECUTION,
+                        "needs_clarification": False,
+                        "clarification_question": None,
+                        "suggested_corrections": []
+                    }
+                
+                break
+    
+    if not found_action:
+        try:
+            if tool_executor_global and tool_executor_global.tools_dict.get(action_to_execute.tool):
+                observation = tool_executor_global.invoke(action_to_execute)
+                
+                # Armazenar resultado na memória de curto prazo
+                short_term_memory.store_result(
+                    tool_name=action_to_execute.tool, 
+                    tool_input=tool_input, 
+                    result=observation,
+                    success=True
+                )
+                
+                # Criar novo AgentAction e adicionar ao outcome
+                agent_action = AgentAction(
+                    tool=action_to_execute.tool, 
+                    tool_input=action_to_execute.tool_input, 
+                    log=f"Action: {action_to_execute.tool}\nAction Input: {action_to_execute.tool_input}"
+                )
+                updated_agent_outcome.append((agent_action, observation))
+            else:
+                error_msg = f"Error: Tool '{action_to_execute.tool}' not found in tool_executor. Available tools: {list(tool_executor_global.tools_dict.keys()) if tool_executor_global else 'None'}"
+                
+                # Registrar falha na memória de curto prazo
+                short_term_memory.store_result(
+                    tool_name=action_to_execute.tool, 
+                    tool_input=tool_input, 
+                    result=error_msg,
+                    success=False
+                )
+                
+                return {
+                    "agent_outcome": updated_agent_outcome,
+                    "next_action": None,
+                    "final_response": None,
+                    "error": True,
+                    "error_message": error_msg,
+                    "error_category": ErrorCategory.EXECUTION,
+                    "needs_clarification": False,
+                    "clarification_question": None,
+                    "suggested_corrections": []
+                }
+        except Exception as e:
+            error_msg = f"Error executing tool '{action_to_execute.tool}': {str(e)}"
+            print(error_msg)
+            
+            # Registrar falha na memória de curto prazo
+            short_term_memory.store_result(
+                tool_name=action_to_execute.tool, 
+                tool_input=tool_input, 
+                result=error_msg,
+                success=False
+            )
+            
+            # Last attempt to update the outcome if the error happened during observation
             last_outcome_item = updated_agent_outcome[-1]
             if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
                 # Atualiza a observação da AgentAction com a mensagem de erro
@@ -1817,10 +1921,32 @@ def execute_tool_node(state: AgentState) -> dict:
             "clarification_question": None,
             "suggested_corrections": []
         }
+    
+    # Se chegamos até aqui, a ferramenta foi executada com sucesso
+    return {
+        "agent_outcome": updated_agent_outcome,
+        "next_action": None,
+        "final_response": None,
+        "error": False,
+        "error_message": None,
+        "error_category": ErrorCategory.NONE,
+        "needs_clarification": False,
+        "clarification_question": None,
+        "suggested_corrections": []
+    }
 
 def should_continue_router(state: AgentState) -> str:
     """Determines the next step after the LLM has made a decision or a tool has run."""
+    global tool_tracker, short_term_memory
     print("---ROUTING LOGIC (should_continue_router)---")
+
+    # Verificar se há loops detectados que requerem finalização imediata
+    if state.get("error_category") == ErrorCategory.LOOP_DETECTED:
+        print(f"Router: Loop detectado na execução. Finalizando execução.")
+        # Resetar os rastreadores quando finaliza por detecção de loop
+        tool_tracker.reset()
+        short_term_memory.reset()
+        return "end_conversation"
     
     # Primeiro, verifica se temos uma solicitação de esclarecimento
     # Este é um caso especial de "erro" que na verdade é tratado como uma resposta final
@@ -1856,6 +1982,8 @@ def should_continue_router(state: AgentState) -> str:
             error_msg = f"Não consegui entender a solicitação: {error_msg}"
         elif error_category == ErrorCategory.EXECUTION:
             error_msg = f"Erro na execução: {error_msg}"
+        elif error_category == ErrorCategory.LOOP_DETECTED:
+            error_msg = f"Loop detectado na execução: {error_msg}"
             
         print(f"Router: Error flagged by previous node. Category: {error_category}. Routing to END_ERROR. Message: {error_msg}")
         
@@ -1863,7 +1991,36 @@ def should_continue_router(state: AgentState) -> str:
         if not state.get("final_response"):
             state["final_response"] = error_msg
             
+        # Resetar os rastreadores quando finaliza com erro
+        if tool_tracker:
+            tool_tracker.reset()
+        if short_term_memory:
+            short_term_memory.reset()
+            
         return "end_error" 
+
+    # Verificar se temos indícios fortes de loops ou tarefas concluídas com base nas estatísticas
+    if tool_tracker:
+        stats = tool_tracker.get_call_statistics()
+        
+        # Se temos um padrão conhecido de loop e muitas chamadas totais, finalizar
+        if hasattr(tool_tracker, "known_patterns") and tool_tracker.known_patterns and stats["total_calls"] > 8:
+            print(f"Router: Detected known loop pattern after {stats['total_calls']} calls. Routing to END_CONVERSATION.")
+            
+            # Preparar mensagem final apropriada caso não exista
+            if not state.get("final_response"):
+                most_used = stats.get("most_used_tool", "")
+                if most_used == "GitStatus":
+                    state["final_response"] = "O repositório Git foi verificado múltiplas vezes. Parece estar em um estado limpo ou as alterações já foram processadas."
+                elif most_used == "GitPush":
+                    state["final_response"] = "As alterações foram enviadas para o repositório remoto ou a operação foi concluída."
+                else:
+                    state["final_response"] = f"A tarefa parece estar concluída após {stats['total_calls']} ações."
+            
+            # Resetar os rastreadores
+            tool_tracker.reset()
+            short_term_memory.reset()
+            return "end_conversation"
 
     # If we have successful commit or Git completion info in the last tool observations, end the conversation
     # This helps prevent loops after a successful Git operation
@@ -1877,16 +2034,25 @@ def should_continue_router(state: AgentState) -> str:
                 "Nothing to commit", 
                 "already been committed",
                 "successfully pushed",
-                "branch is already up to date"
+                "branch is already up to date",
+                "(META: Repositório limpo",
+                "(META: Branch local à frente"
             ]):
                 print("Router: Detected completed Git operation in last observation. Routing to END_CONVERSATION.")
                 if state.get("final_response") is None:
                     state["final_response"] = last_observation
+                
+                # Resetar os rastreadores ao detectar conclusão bem-sucedida
+                tool_tracker.reset()
+                short_term_memory.reset()
                 return "end_conversation"
 
     # Se o call_model gerou uma resposta final
     if state.get("final_response") is not None:
         print("Router: Final response is present. Routing to END_CONVERSATION.")
+        # Resetar os rastreadores quando finaliza com resposta
+        tool_tracker.reset()
+        short_term_memory.reset()
         return "end_conversation"
         
     # Se o call_model decidiu por uma próxima ação (ferramenta)
@@ -1915,23 +2081,27 @@ def should_continue_router(state: AgentState) -> str:
 
 def router_node(state: AgentState) -> dict:
     """Routes the execution flow based on the current state."""
-    global tool_calls_counter, total_tool_calls
+    global tool_tracker, short_term_memory
     print("---ROUTER NODE---")
     
     # Verificar se há uma resposta final
     if state.get("final_response"):
         print("---FINALIZADO COM RESPOSTA---")
-        # Reset dos contadores quando finaliza com sucesso
-        tool_calls_counter = {}
-        total_tool_calls = 0
+        # Reset dos rastreadores quando finaliza com sucesso
+        if tool_tracker:
+            tool_tracker.reset()
+        if short_term_memory:
+            short_term_memory.reset()
         return {"next": "end"}
     
     # Verificar se há um erro
     if state.get("error") == True:
         print("---FINALIZADO COM ERRO---")
-        # Reset dos contadores quando há um erro
-        tool_calls_counter = {}
-        total_tool_calls = 0
+        # Reset dos rastreadores quando há um erro
+        if tool_tracker:
+            tool_tracker.reset()
+        if short_term_memory:
+            short_term_memory.reset()
         return {"next": "end"}
         
     # Verificar se há uma próxima ação
@@ -1950,12 +2120,18 @@ def router_node(state: AgentState) -> dict:
         ["ReadFile", "AppendFile", None],        # Ler, anexar e finalizar
     ]
     
+    # Verificar também registros na memória de curto prazo
+    if short_term_memory and short_term_memory.successful_patterns:
+        # Ver se algum padrão conhecido foi detectado
+        if short_term_memory.successful_patterns and tool_tracker:
+            stats = tool_tracker.get_call_statistics()
+            if stats["total_calls"] > 8:
+                print(f"---PADRÃO DETECTADO NA MEMÓRIA DE CURTO PRAZO APÓS {stats['total_calls']} AÇÕES---")
+                # Não finaliza automaticamente, mas ajusta o prompt para o modelo na próxima iteração
+    
     for pattern in success_patterns:
         if len(last_actions) >= len(pattern) and all(a == b or b is None for a, b in zip(last_actions[-len(pattern):], pattern)):
             print(f"---PADRÃO DE SUCESSO DETECTADO: {pattern}---")
-            # Reset dos contadores ao detectar padrão de sucesso
-            tool_calls_counter = {}
-            total_tool_calls = 0
             # Não finaliza automaticamente, permite uma última chamada ao modelo
     
     # Se não há uma próxima ação e não há erro, voltar para o modelo
@@ -1965,16 +2141,16 @@ def router_node(state: AgentState) -> dict:
 def main():
     global llm_model, agent_tools_list_global, agent_prefix_prompt_global, tool_executor_global, tool_calls_counter, total_tool_calls
 
-    print(f"Loading Ollama LLM (llama3.1:8b) as ChatModel...")
+    print(f"Loading Ollama LLM (qwen3:14b) as ChatModel...")
     try:
         # Renomear a variável local para não sombrear a global, ou atribuir diretamente
-        local_llm = ChatOllama(model="llama3.1:8b")
+        local_llm = ChatOllama(model="qwen3:14b")
         local_llm.invoke("Hello, are you working?") # Test call
         llm_model = local_llm # Atribuir à global
         print("Ollama ChatModel loaded successfully.")
     except Exception as e:
         print(f"Error loading Ollama ChatModel: {e}")
-        print(f"Please ensure the Ollama application is running and the model 'llama3.1:8b' is available.")
+        print(f"Please ensure the Ollama application is running and the model 'qwen3:14b' is available.")
         return
 
     # Lista de ferramentas disponíveis 
@@ -2359,88 +2535,301 @@ def handle_direct_operation(user_input: str) -> bool:
     return False
 
 def run_agent(query: str, chat_history: list = None, prefix_prompt: str = None) -> tuple:
-    """Runs the agent with a query and returns the result.
-    
-    Args:
-        query: The user query to process
-        chat_history: Optional chat history
-        prefix_prompt: Optional prefix prompt
-        
-    Returns:
-        tuple: (output_text, chat_history)
     """
-    global llm_model, agent_tools_list_global, agent_prefix_prompt_global, tool_executor_global, tool_calls_counter, total_tool_calls
+    Run the agent with the given query and chat history.
+    Returns a tuple of (result, chat_history).
+    """
+    global llm_model, agent_tools_list_global, agent_prefix_prompt_global, tool_executor_global
+    global tool_tracker, short_term_memory # Sistemas de monitoramento
     
-    # Reset dos contadores a cada nova execução do agente
-    tool_calls_counter = {}
-    total_tool_calls = 0
-    
+    # Verificar se o LLM está inicializado 
     if llm_model is None:
-        return "LLM is not initialized. Please run main() first.", chat_history
-
-    # Configurar chat history se não fornecido
+        print(f"Warning: LLM model not initialized, trying to load...")
+        try:
+            local_llm = ChatOllama(model="qwen3:14b")
+            local_llm.invoke("Hello, are you working?") # Test call
+            llm_model = local_llm
+            print("Ollama ChatModel loaded successfully.")
+        except Exception as e:
+            error_msg = f"Error loading Ollama ChatModel: {e}. Please ensure the Ollama application is running."
+            print(error_msg)
+            return (error_msg, chat_history or [])
+    
+    # Resetar os sistemas de rastreamento para a nova consulta
+    if tool_tracker:
+        tool_tracker.reset()
+    else:
+        tool_tracker = ToolExecutionTracker(max_consecutive_calls=3, max_total_calls=15, window_size=5)
+        
+    if short_term_memory:
+        short_term_memory.reset()
+    else:
+        short_term_memory = ShortTermMemory(max_items=20)
+    
+    # Setup chat history if not provided
     if chat_history is None:
         chat_history = []
         
-    # Usar o prefix_prompt fornecido ou o padrão
-    prefix_to_use = prefix_prompt if prefix_prompt is not None else agent_prefix_prompt_global
+    # Set the global prefix prompt if provided
+    if prefix_prompt is not None:
+        agent_prefix_prompt_global = prefix_prompt
     
-    # Definir ferramentas
-    tools = agent_tools_list_global
-    message_history = chat_history + [HumanMessage(content=query)]
+    # Check if query is a direct operation
+    is_direct_op = handle_direct_operation(query)
+    if is_direct_op:
+        # O resultado já foi tratado por handle_direct_operation e mostrado ao usuário
+        return ("", chat_history)  # Retorna string vazia porque o resultado já foi mostrado
+
+    # Try to parse for special cases and shortcuts
+    git_commit_shortcut = re.search(r'commit\s+(.*?)\s*$', query, re.IGNORECASE)
+    if git_commit_shortcut:
+        commit_msg = git_commit_shortcut.group(1).strip('"\'')
+        if commit_msg:
+            print(f"Special case: Direct GitAddCommit with message '{commit_msg}'")
+            result = git_add_commit_command(commit_msg)
+            chat_history.append(HumanMessage(content=query))
+            chat_history.append(AIMessage(content=result))
+            return (result, chat_history)
     
-    # Criação do workflow de LangGraph
+    git_push_shortcut = re.search(r'\b(git\s+)?push\b\s*$', query, re.IGNORECASE)
+    if git_push_shortcut:
+        print(f"Special case: Direct GitPush")
+        result = git_push_command("")
+        chat_history.append(HumanMessage(content=query))
+        chat_history.append(AIMessage(content=result))
+        return (result, chat_history)
+        
+    # Check for GitStatus shortcut
+    git_status_shortcut = re.search(r'\b(git\s+)?status\b\s*$', query, re.IGNORECASE)
+    if git_status_shortcut:
+        print(f"Special case: Direct GitStatus")
+        result = git_status_command("")
+        chat_history.append(HumanMessage(content=query))
+        chat_history.append(AIMessage(content=result))
+        return (result, chat_history)
+    
+    # Create an instance of the agent executor
+    # First, setup the tool list if not already done
+    if not agent_tools_list_global:
+        # Set up the tools list first
+        agent_tools_list_global = [
+            Tool(
+                name="Terminal",
+                func=run_shell_command_string,
+                description=(
+                    "Use this tool for executing GENERAL macOS terminal commands that are NOT Git related or if no specific tool exists. "
+                    "Input should be a VALID single command string. "
+                    "Example for listing files: 'ls -la'. "
+                    "Example for printing working directory: 'pwd'. "
+                    "Example for creating a file with content: 'echo \"hello world content\" > my_file.txt'. The quotes around content are important. "
+                    "IMPORTANT: For Git-specific operations (status, branch, commit, pull, log, push), ALWAYS prefer the dedicated Git tools."
+                ),
+            ),
+            Tool(
+                name="GitStatus",
+                func=git_status_command,
+                description=(
+                    "This is the PREFERRED tool for getting the current status of the Git repository. "
+                    "Use this to check for uncommitted changes before pushing or to get the branch's status relative to its upstream. "
+                    "The input can be empty as it doesn't require parameters."
+                ),
+            ),
+            Tool(
+                name="GitCurrentBranch",
+                func=git_current_branch_command,
+                description=(
+                    "Gets the name of the current Git branch. "
+                    "The input can be empty as it doesn't require parameters."
+                ),
+            ),
+            Tool(
+                name="GitCreateBranch",
+                func=git_create_branch_command,
+                description=(
+                    "Creates a new Git branch and switches to it. "
+                    "Input should be the name of the new branch to create."
+                ),
+            ),
+            Tool(
+                name="GitAddCommit",
+                func=git_add_commit_command, 
+                description=(
+                    "This is the PREFERRED tool for committing changes. It performs both 'git add .' and 'git commit' in one step. "
+                    "Input should be the commit message. For example: 'feat: add new login feature'. "
+                    "This will automatically stage ALL changes before committing."
+                ),
+            ),
+            Tool(
+                name="GitPull",
+                func=git_pull_command,
+                description=(
+                    "Pulls the latest changes from the remote repository. "
+                    "The input can be empty as it doesn't require parameters."
+                ),
+            ),
+            Tool(
+                name="GitLogShort",
+                func=git_log_short_command,
+                description=(
+                    "Get a concise log of recent Git commits. "
+                    "The input can be empty as it doesn't require parameters."
+                ),
+            ),
+            Tool(
+                name="GitPush",
+                func=git_push_command,
+                description=(
+                    "Push committed changes to the remote repository. "
+                    "Input should be the branch name to push to, or empty to push to the tracking branch."
+                ),
+            ),
+            Tool(
+                name="GitDiffSummary",
+                func=git_diff_summary_command,
+                description=(
+                    "Get a semantic analysis of the current changes for better commit messages. "
+                    "The input can be empty as it doesn't require parameters."
+                ),
+            ),
+            Tool(
+                name="ReadFile",
+                func=read_file_command,
+                description=(
+                    "Reads the content of a file and returns it. "
+                    "Input should be the file path to read. For example: 'my_file.txt' or '/path/to/file.py'."
+                ),
+            ),
+            Tool(
+                name="WriteFile",
+                func=write_file_command,
+                description=(
+                    "Writes content to a file, overwriting any existing content. "
+                    "Input should be in the format: 'filepath|content'. "
+                    "For example: 'my_file.txt|This is the new content' or 'script.py|print(\"Hello world\")'."
+                ),
+            ),
+            Tool(
+                name="AppendFile",
+                func=append_file_command,
+                description=(
+                    "Appends content to the end of a file, preserving existing content. "
+                    "Input should be in the format: 'filepath|content'. "
+                    "For example: 'log.txt|New log entry' will add 'New log entry' to the end of log.txt."
+                ),
+            ),
+            Tool(
+                name="CreateDirectory",
+                func=create_directory_command,
+                description=(
+                    "Creates a new directory (folder) if it doesn't already exist. "
+                    "Input should be the directory path to create. For example: 'new_folder' or 'path/to/new_dir'."
+                ),
+            ),
+            Tool(
+                name="ListFiles",
+                func=list_files_command,
+                description=(
+                    "Lists files and directories in the specified directory. "
+                    "Input should be the directory path to list, or '.' for current directory."
+                ),
+            ),
+        ]
+    
+    # Initialize the tool executor if not already done
+    if tool_executor_global is None:
+        tool_executor_global = ToolExecutor(tools=agent_tools_list_global)
+    
+    # Create the LangGraph
     workflow = StateGraph(AgentState)
     
-    # Nós do LangGraph
+    # Define the nodes
     workflow.add_node("call_model", call_model)
     workflow.add_node("execute_tool", execute_tool_node)
-    workflow.add_node("router", router_node)
-    workflow.add_node("end", end_node)
     
-    # Ligações do LangGraph
+    # Connect the nodes
+    workflow.add_edge("call_model", "execute_tool")
+    workflow.add_conditional_edges(
+        "execute_tool",
+        should_continue_router,
+        {
+            "continue_tool": "call_model",
+            "end_conversation": END,
+            "end_error": END,
+        }
+    )
+    workflow.add_conditional_edges(
+        "call_model",
+        should_continue_router,
+        {
+            "continue_tool": "execute_tool",
+            "end_conversation": END,
+            "end_error": END,
+        }
+    )
+    
+    # Set a default "starting point" for the graph
     workflow.set_entry_point("call_model")
-    workflow.add_edge("call_model", "router")
-    workflow.add_edge("router", "execute_tool")
-    workflow.add_edge("execute_tool", "router")
-    workflow.add_edge("router", "call_model")
-    workflow.add_edge("router", "end")
     
-    # Compilar o workflow
-    agent_executor = workflow.compile()
+    # Convert the graph to a runnable and run it
+    app = workflow.compile()
     
-    # Executar o workflow
-    message_history_only_content = [msg.content for msg in message_history]
+    # For deterministic agent behavior, if needed
+    # app.invoke = app.__call__
+    
+    # Build the initial state
+    # Add the human's message to the chat history
+    chat_history.append(HumanMessage(content=query))
+    
+    # Build the initial state and run the agent
     try:
-        result = agent_executor.invoke({
-            "messages": message_history_only_content,
-            "prefix_prompt": prefix_to_use,
+        print(f"Running agent with query: {query}")
+        
+        initial_state = {
+            "input": query,
+            "chat_history": chat_history.copy(),
             "agent_outcome": [],
-            "suggested_corrections": [],
+            "next_action": None,
+            "final_response": None,
             "error": False,
             "error_message": None,
             "error_category": ErrorCategory.NONE,
             "needs_clarification": False,
             "clarification_question": None,
-            "next_action": None,
-        })
+            "suggested_corrections": []
+        }
         
-        if "output" in result and result["output"]:
-            output = result["output"]
-            return output, message_history + [AIMessage(content=output)]
+        result = app.invoke(initial_state)
+        if "final_response" in result and result["final_response"]:
+            final_answer = result["final_response"]
         else:
-            output = "Não foi possível gerar uma resposta. Por favor, reformule sua pergunta."
-            return output, message_history
-            
+            # Fallback if there's no final response but there is an error message
+            if "error_message" in result and result["error_message"]:
+                final_answer = f"Error: {result['error_message']}"
+            else:
+                # Last resort if both final_response and error_message are missing
+                final_answer = "I've completed the task, but couldn't generate a final response."
+        
+        # Add the agent's response to the chat history
+        chat_history.append(AIMessage(content=final_answer))
+        
+        # Resetar os rastreadores após completar a execução
+        tool_tracker.reset()
+        short_term_memory.reset()
+        
+        return (final_answer, chat_history)
+        
     except Exception as e:
-        print(f"Exception during agent execution: {e}")
+        error_msg = f"Error running agent: {str(e)}"
+        print(error_msg)
         import traceback
         traceback.print_exc()
-        error_msg = str(e)
-        if len(error_msg) > 100:
-            error_msg = error_msg[:100] + "..."
-        error_msg = f"Não consegui entender a solicitação: {error_msg}"
-        return error_msg, message_history
+        chat_history.append(AIMessage(content=error_msg))
+        
+        # Resetar os rastreadores em caso de erro
+        tool_tracker.reset()
+        short_term_memory.reset()
+        
+        return (error_msg, chat_history)
 
 def generate_semantic_commit_message(diff_summary: str) -> str:
     """Gera uma mensagem de commit semântica baseada no diff dos arquivos alterados.
