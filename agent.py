@@ -10,47 +10,47 @@ from langchain_core.messages import HumanMessage
 def run_terminal_command(command_parts: list[str]) -> str:
     """Executes a command in the macOS terminal and returns its output.
     Takes a list of command parts (e.g., ['ls', '-la']).
+    Attempts to run commands directly; uses shell=True only if redirection (>, >>) is detected.
     """
+    command_str_for_error_reporting = shlex.join(command_parts)
     try:
-        # Ensure the command is run with the user's default shell if it's a simple command
-        # For complex commands, the shell=False (default) with list of args is safer
-        # However, for general purpose, and to easily use things like pipes or cd (which needs shell context),
-        # we might need to be more nuanced or stick to shell=True but sanitize inputs rigorously.
-        # For now, let's try to make it safer by avoiding shell=True when not strictly necessary.
+        # Check for shell-specific operations like redirection
+        # This is a heuristic; more robust parsing might be needed for complex cases.
+        uses_shell_features = False
+        full_command_str = shlex.join(command_parts) # For potential shell=True execution
         
-        # If the command is simple (e.g. git status, ls, pwd), can run directly
-        # If it involves shell features like pipes, redirection, `cd` it needs shell=True and careful handling.
-        # Given current tools mostly call specific git commands or simple ones like pwd/ls,
-        # using a list of arguments (shell=False) is generally safer.
-        if command_parts[0] == 'git' or command_parts[0] == 'ls' or command_parts[0] == 'pwd':
-             result = subprocess.run(
-                command_parts, # Command as a list of arguments
+        if ">" in full_command_str or "<" in full_command_str or "|" in full_command_str or "&&" in full_command_str or ";" in full_command_str:
+            uses_shell_features = True
+
+        if uses_shell_features:
+            # For commands with redirection, pipes, etc., shell=True is needed.
+            # The command is joined back into a string.
+            # Ensure that if the command involves writing content to a file, e.g., echo "some content" > file.txt,
+            # the LLM forms the command string correctly.
+            result = subprocess.run(
+                full_command_str,
+                shell=True,
                 capture_output=True,
                 text=True,
                 check=True,
-                # executable='/bin/zsh' # Not needed if PATH is correct and shell=False
+                executable='/bin/zsh' # Explicitly use zsh for shell=True
             )
-        else: # For commands that might need shell features (like echo "..." > file)
-            # We need to be extremely careful here if inputs are part of the command string.
-            # shlex.join is good for safely creating a command string if needed.
-            # For now, assuming tools that use this branch are well-defined.
-            full_command_str = shlex.join(command_parts)
+        else:
+            # For most other commands, run directly as a list of arguments (safer).
             result = subprocess.run(
-                full_command_str, 
-                shell=True, 
-                capture_output=True, 
-                text=True, 
-                check=True,
-                executable='/bin/zsh'
+                command_parts, 
+                capture_output=True,
+                text=True,
+                check=True
             )
-
+        
         return result.stdout.strip() if result.stdout else "Command executed successfully (no output)."
     except subprocess.CalledProcessError as e:
-        return f"Error executing command '{shlex.join(command_parts)}': {e.stderr.strip()}"
+        return f"Error executing command '{command_str_for_error_reporting}': {e.stderr.strip()}"
     except FileNotFoundError:
         return f"Error: The command '{command_parts[0]}' was not found. Please ensure it is installed and in your PATH."
     except Exception as e:
-        return f"An unexpected error occurred with command '{shlex.join(command_parts)}': {str(e)}"
+        return f"An unexpected error occurred with command '{command_str_for_error_reporting}': {str(e)}"
 
 # --- Funções Específicas para Git ---
 def git_status_command(_: str) -> str:
@@ -127,10 +127,13 @@ def main():
     tools = [
         Tool(
             name="Terminal",
-            func=lambda cmd_str: run_terminal_command(shlex.split(cmd_str)), # Adapt to take string and split
+            func=lambda cmd_str: run_terminal_command(shlex.split(cmd_str)),
             description=(
                 "Use this tool for executing GENERAL macOS terminal commands that are NOT Git related or if no specific tool exists. "
-                "Input should be a VALID single command string (e.g., 'ls -la' or 'pwd' or 'echo hello > test.txt'). "
+                "Input should be a VALID single command string. "
+                "Example for listing files: 'ls -la'. "
+                "Example for printing working directory: 'pwd'. "
+                "Example for creating a file with content: 'echo \"hello world content\" > my_file.txt'. Note the escaped quotes for the content. "
                 "IMPORTANT: For Git-specific operations (status, branch, commit, pull, log), ALWAYS prefer the dedicated Git tools."
             ),
         ),
@@ -202,8 +205,9 @@ def main():
                 "2. Action: On a new line, write the name of the single best specialized tool for the task if one exists (e.g., GitStatus, GitCreateBranch). "
                 "   If no specialized tool fits, and the task is a general terminal command, use the 'Terminal' tool. "
                 "3. Action Input: On the very next line, write the input required by the chosen tool. If the tool takes no input, write an empty string or a placeholder like '' or 'no input'. "
+                "   For the 'Terminal' tool, the Action Input MUST be a valid shell command string. For creating files with content, use the format: echo \"your content here\" > filename.txt "
                 "4. OBSERVE: After the tool executes, you will receive an Observation. "
-                "5. CRITICAL: If the Observation directly and fully answers the user's request, or if the action was successfully performed, your response MUST be ONLY: "
+                "5. CRITICAL: If the Observation indicates successful execution or directly and fully answers the user's request, your response MUST be ONLY: "
                 "   Thought: I have the answer or the action is complete. "
                 "   Final Answer: [Provide the direct answer or confirmation here]. "
                 "   Do not take further unnecessary actions. "
