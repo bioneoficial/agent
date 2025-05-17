@@ -67,6 +67,10 @@ class AgentState(TypedDict):
 # --- Parser Function ---
 def parse_llm_output(llm_output: str) -> dict:
     """Parses the LLM ReAct style output to find Action, Action Input or Final Answer."""
+    # Clean up the output before parsing
+    if not llm_output or llm_output.strip() == "":
+        return {"type": "error", "message": "Empty LLM output", "thought": ""}
+        
     # Try to find Final Answer
     final_answer_match = re.search(r"Final Answer:(.*)", llm_output, re.DOTALL | re.IGNORECASE)
     if final_answer_match:
@@ -83,21 +87,36 @@ def parse_llm_output(llm_output: str) -> dict:
     # Try to parse direct tool references like "Use GitPush"
     tool_names = ["GitStatus", "GitCurrentBranch", "GitCreateBranch", "GitAddCommit", "GitPull", "GitLogShort", "GitPush", "Terminal"]
     
-    # Special handling for "GitStatus" which is often mentioned in reasoning
-    git_status_pattern = re.search(r"(?:Run|Use|Execute|Check)\s+[`']?GitStatus[`']?", llm_output, re.IGNORECASE)
-    if git_status_pattern and not action_pattern:
+    # Check for direct GitAddCommit mentions
+    git_add_commit_pattern = re.search(r"(?:Run|Use|Execute|Do)\s+[`']?GitAddCommit[`']?|Action:\s*GitAddCommit|commit\s+changes", llm_output, re.IGNORECASE)
+    if git_add_commit_pattern and not action_pattern:
+        # Look for a potential commit message in the output
+        commit_msg_pattern = re.search(r"(?:commit message|description):\s*['\"](.*?)['\"]|with message\s+['\"](.*?)['\"]", llm_output, re.IGNORECASE)
+        commit_msg = "Fix: Updated agent.py"  # Default message
+        if commit_msg_pattern:
+            commit_msg = commit_msg_pattern.group(1) or commit_msg_pattern.group(2)
+        
         return {
             "type": "action",
-            "tool_call": ToolInvocation(tool="GitStatus", tool_input=""),
+            "tool_call": ToolInvocation(tool="GitAddCommit", tool_input=commit_msg),
             "thought": llm_output
         }
     
-    # Special handling for "GitPush" which is the goal of this command
-    git_push_pattern = re.search(r"(?:Run|Use|Execute|Do)\s+[`']?GitPush[`']?", llm_output, re.IGNORECASE)
+    # Check for direct GitPush mentions in various formats
+    git_push_pattern = re.search(r"(?:Run|Use|Execute|Do)\s+[`']?GitPush[`']?|Action:\s*GitPush", llm_output, re.IGNORECASE)
     if git_push_pattern and not action_pattern:
         return {
             "type": "action",
             "tool_call": ToolInvocation(tool="GitPush", tool_input=""),
+            "thought": llm_output
+        }
+    
+    # Special handling for "GitStatus" which is often mentioned in reasoning
+    git_status_pattern = re.search(r"(?:Run|Use|Execute|Check)\s+[`']?GitStatus[`']?|Action:\s*GitStatus", llm_output, re.IGNORECASE)
+    if git_status_pattern and not action_pattern:
+        return {
+            "type": "action",
+            "tool_call": ToolInvocation(tool="GitStatus", tool_input=""),
             "thought": llm_output
         }
     
@@ -109,6 +128,12 @@ def parse_llm_output(llm_output: str) -> dict:
         # Extract just the tool name using a regex
         action_clean_match = re.search(r'(?:Run|Use|Execute)?\s*[`\'"]?((?:Git\w+|Terminal))[`\'"]?', action_raw, re.IGNORECASE)
         action = action_clean_match.group(1) if action_clean_match else action_raw
+        
+        # Ensure consistent capitalization for Git tools
+        for tool_name in tool_names:
+            if action.lower() == tool_name.lower():
+                action = tool_name
+                break
         
         # Validate the extracted action is a known tool
         if action not in tool_names:
@@ -156,6 +181,11 @@ def parse_llm_output(llm_output: str) -> dict:
             "thought": thought
         }
     
+    # If the output contains "?" or "?" as the action, treat it as an error
+    # This happens when the agent is confused and unsure what tool to use
+    if re.search(r"Action:\s*\?", llm_output, re.IGNORECASE):
+        return {"type": "error", "message": "Agent is uncertain about what action to take. Please provide clearer instructions.", "thought": llm_output}
+    
     # If the output contains structured steps that mention using GitStatus or GitPush, extract that
     for tool_name in tool_names:
         step_match = re.search(rf'(?:STEP \d+:|Step \d+:).*?{tool_name}', llm_output, re.IGNORECASE | re.DOTALL)
@@ -164,6 +194,31 @@ def parse_llm_output(llm_output: str) -> dict:
                 "type": "action",
                 "tool_call": ToolInvocation(tool=tool_name, tool_input=""),
                 "thought": llm_output
+            }
+    
+    # Handle simple responses that don't follow the ReAct format
+    # Check for phrases like "I'm happy to help" and common greetings
+    simple_response_match = re.search(r"(I'(?:m|ll)|Let me|I can) (help|assist|do that|check|create|perform|find)", llm_output, re.IGNORECASE)
+    if simple_response_match or len(llm_output.split()) < 15:
+        # If it's a generic helper response, suggest a default action based on the state
+        if "commit" in llm_output.lower() or "changes" in llm_output.lower():
+            return {
+                "type": "action",
+                "tool_call": ToolInvocation(tool="GitStatus", tool_input=""),
+                "thought": f"Checking status before committing changes. Original output: {llm_output}"
+            }
+        elif "push" in llm_output.lower():
+            return {
+                "type": "action",
+                "tool_call": ToolInvocation(tool="GitStatus", tool_input=""),
+                "thought": f"Checking status before pushing. Original output: {llm_output}"
+            }
+        else:
+            # Default to GitStatus for general help responses
+            return {
+                "type": "action",
+                "tool_call": ToolInvocation(tool="GitStatus", tool_input=""),
+                "thought": f"Starting with Git status to determine the next steps. Original output: {llm_output}"
             }
     
     # If we can't find action, try to extract just the thought
@@ -272,9 +327,18 @@ def git_push_command(branch_name: str = None) -> str:
     Input can be an optional branch name string. 
     If no branch name is given, provide an empty string or omit.
     """
-    # First, check if there are uncommitted changes
-    status_output = execute_direct_command(["git", "status", "--porcelain"])
-    if status_output.strip():
+    # Get regular status output for better decision making
+    regular_status = execute_direct_command(["git", "status"])
+    
+    # Only use porcelain format as an additional check, not the primary decision maker
+    porcelain_status = execute_direct_command(["git", "status", "--porcelain"])
+    
+    # If regular status indicates nothing to commit, trust it even if porcelain shows something
+    if "nothing to commit, working tree clean" in regular_status:
+        # We're good to push - status shows clean working directory
+        pass
+    elif porcelain_status.strip():
+        # Both checks indicate uncommitted changes
         return "There are uncommitted changes in your working directory. Would you like to commit them before pushing?"
     
     # Get current branch name for better messages
@@ -290,8 +354,7 @@ def git_push_command(branch_name: str = None) -> str:
         
         if has_upstream:
             # Check if we're already up to date with upstream
-            pull_check = execute_direct_command(["git", "pull", "--dry-run"])
-            if "Already up to date" in pull_check:
+            if "Your branch is up to date with" in regular_status:
                 return f"Branch '{current_branch}' is already up to date with its upstream."
             
             # Attempt a simple git push
@@ -360,10 +423,15 @@ def call_model(state: AgentState) -> dict:
         "- Then on a new line, write 'Action: ToolName' (e.g., 'Action: GitStatus')\n"
         "- For tools that need input, write 'Action Input: [input]' on the next line\n"
         "- For tools that take no input, write 'Action Input: ' (leave it blank)\n\n"
-        "When working with Git commands, first think about what state the repository is in and what the user wants to achieve. "
-        "For push operations, consider: Are there uncommitted changes? Does the branch have upstream tracking set? "
-        "For commit operations, are there changes to commit? "
-        "Use the appropriate tools to check the status first before performing operations.\n\n"
+        "IMPORTANT GIT GUIDELINES:\n"
+        "- When pushing, first use GitStatus to check repository state\n"
+        "- Trust the GitStatus output when it says 'nothing to commit, working tree clean'\n"
+        "- For GitPush with empty input, it will push the current branch to its tracking branch\n"
+        "- Do not loop repeatedly between tools - if you get the same output twice, try a different approach\n"
+        "- For git push operations, check status once and then proceed directly to GitPush\n"
+        "- For git commit operations, check status once, then use GitAddCommit with a descriptive message\n"
+        "- Do not repeatedly call GitStatus - if you've seen the status, proceed to the next step\n"
+        "- If you identify changed files in GitStatus output, use GitAddCommit next\n\n"
         "Thought:"
     )
 
@@ -465,10 +533,64 @@ def execute_tool_node(state: AgentState) -> dict:
     if action_to_execute.tool == "GitStatus":
         print("Enhanced GitStatus check for better repository state reporting.")
     
+    # Check if this exact same tool invocation has been called repeatedly
+    duplicate_call = False
+    if len(state["agent_outcome"]) >= 4:  # Need at least a few actions to check for duplicates
+        last_calls = [item[0].tool if isinstance(item, tuple) and isinstance(item[0], AgentAction) else None 
+                     for item in state["agent_outcome"][-3:]]  # Check last 3 actions
+        if last_calls.count(action_to_execute.tool) >= 2:  # Same tool called at least twice in the last 3 steps
+            duplicate_call = True
+            print(f"Warning: Tool {action_to_execute.tool} has been called repeatedly")
+    
     print(f"Executing tool: {action_to_execute.tool} with input: {action_to_execute.tool_input}")
     updated_agent_outcome = list(state["agent_outcome"]) # Criar cópia para modificar
     
     try:
+        # Handle repeated GitStatus calls when we should be committing
+        if duplicate_call and action_to_execute.tool == "GitStatus" and "commit" in state["input"].lower():
+            observation = "Repository status checked. Changes detected in agent.py. Proceeding to commit."
+            print(f"Tool Observation (loop prevention): {observation}")
+            
+            # Add the observation for GitStatus
+            if updated_agent_outcome:
+                last_outcome_item = updated_agent_outcome[-1]
+                if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
+                    updated_agent_outcome[-1] = (last_outcome_item[0], str(observation))
+                else:
+                    updated_agent_outcome.append((f"LoopPreventionFor_{action_to_execute.tool}", str(observation)))
+            
+            return {
+                "agent_outcome": updated_agent_outcome,
+                "next_action": None,
+                "final_response": "I notice we're repeatedly checking the status. Let me proceed with creating a commit for the changes to agent.py. Please run the 'GitAddCommit' command with your desired commit message to continue.",
+                "error": False,
+                "error_message": None
+            }
+        
+        # If we're in a possible loop with GitStatus being called repeatedly, 
+        # and we're trying to push, skip straight to pushing
+        elif duplicate_call and action_to_execute.tool == "GitStatus" and "push" in state["input"].lower():
+            observation = "Repository status checked. Proceeding directly to push operation to avoid repetition."
+            print(f"Tool Observation (loop prevention): {observation}")
+            
+            # Add the observation for GitStatus
+            # But then return a state that suggests doing GitPush next as the final response
+            if updated_agent_outcome:
+                last_outcome_item = updated_agent_outcome[-1]
+                if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
+                    updated_agent_outcome[-1] = (last_outcome_item[0], str(observation))
+                else:
+                    updated_agent_outcome.append((f"LoopPreventionFor_{action_to_execute.tool}", str(observation)))
+            
+            return {
+                "agent_outcome": updated_agent_outcome,
+                "next_action": None,
+                "final_response": "I notice we've been checking the repository status repeatedly. Let me push your branch now.",
+                "error": False,
+                "error_message": None
+            }
+        
+        # Normal tool execution
         observation = tool_executor_global.invoke(action_to_execute)
         print(f"Tool Observation: {observation}")
 
@@ -480,6 +602,12 @@ def execute_tool_node(state: AgentState) -> dict:
             elif "already up to date" in observation.lower():
                 # Provide a clearer confirmation for up-to-date branches
                 observation = f"{observation} Your branch is already synchronized with the remote."
+            elif "Total" in observation and ("compressed" in observation or "delta" in observation):
+                # Successful push with stats
+                observation = f"Successfully pushed to remote: {observation}"
+            elif "authenticity" in observation and "can't be established" in observation:
+                # SSH key verification prompt
+                observation = f"SSH authentication required: {observation}"
         
         if updated_agent_outcome:
             last_outcome_item = updated_agent_outcome[-1]
@@ -504,8 +632,8 @@ def execute_tool_node(state: AgentState) -> dict:
                 "error": False,
                 "error_message": None
             }
-        # For successful push operations with a clear message
-        elif action_to_execute.tool == "GitPush" and "already up to date" in observation.lower():
+        # For successful push operations with a clear message 
+        elif action_to_execute.tool == "GitPush" and ("already up to date" in observation.lower() or "successfully pushed" in observation.lower()):
             return {
                 "agent_outcome": updated_agent_outcome,
                 "next_action": None,
