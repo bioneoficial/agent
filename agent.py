@@ -67,41 +67,50 @@ class AgentState(TypedDict):
 # --- Parser Function ---
 def parse_llm_output(llm_output: str) -> dict:
     """Parses the LLM ReAct style output to find Action, Action Input or Final Answer."""
-    # Tenta encontrar Final Answer
+    # Try to find Final Answer
     final_answer_match = re.search(r"Final Answer:(.*)", llm_output, re.DOTALL | re.IGNORECASE)
     if final_answer_match:
         return {"type": "finish", "return_values": {"output": final_answer_match.group(1).strip()}}
 
-    # Tenta encontrar Action e Action Input
-    # Regex ajustado para ser mais flexível com newlines e capturar o pensamento também.
-    # Pensamento é o texto antes de "Action:"
-    thought_action_match = re.search(r"(.*?)(Action:\s*(.*?)\n+Action Input:\s*(.*))", llm_output, re.DOTALL | re.IGNORECASE)
-    if thought_action_match:
-        thought = thought_action_match.group(1).strip()
-        action = thought_action_match.group(3).strip()
-        action_input_raw = thought_action_match.group(4).strip()
+    # More flexible action pattern matching
+    # Look for "Action:" followed by a tool name, then optionally "Action Input:" or just "Input:"
+    action_pattern = re.search(r"Action:\s*(.*?)(?:\n+(?:Action\s*)?Input:\s*(.*)|$)", llm_output, re.DOTALL | re.IGNORECASE)
+    
+    # Also try an alternative format where Action: is at the end of the text
+    if not action_pattern:
+        action_pattern = re.search(r"Action:\s*(.*?)$", llm_output, re.DOTALL | re.IGNORECASE)
+    
+    if action_pattern:
+        # Extract the tool name and input if available
+        action = action_pattern.group(1).strip()
+        action_input_raw = action_pattern.group(2).strip() if len(action_pattern.groups()) > 1 and action_pattern.group(2) else ""
         
-        # Clean up action input - remove common phrases that aren't actual inputs
-        # Only take first line or up to first parenthesis or explanation
-        action_input_str = action_input_raw.split("\n")[0]
+        # Get all text before "Action:" as the thought
+        thought_match = re.search(r"(.*?)(?:Action:|Final Answer:)", llm_output, re.DOTALL | re.IGNORECASE)
+        thought = thought_match.group(1).strip() if thought_match else ""
         
-        # If the input contains explanations in parentheses, only take the part before that
-        if "(" in action_input_str:
-            action_input_str = action_input_str.split("(")[0].strip()
-        
-        # If after splitting we're left with something empty, make it explicitly empty
-        action_input_str = action_input_str.strip()
-        
-        # Handle special cases for empty/null inputs
-        if not action_input_str or action_input_str.lower() in ["(empty string)", "empty string", "''", '""', 
-                                                           "no input", "none", "null", "empty"]:
+        # Handle case where the LLM wrote "Action: GitPush" but didn't specify input
+        if not action_input_raw and action in ["GitPush", "GitStatus", "GitCurrentBranch", "GitPull", "GitLogShort"]:
+            # These tools can work with empty input
             action_input_str = ""
-        elif action_input_str.startswith("'") and action_input_str.endswith("'"):
-            # Remove single quotes if they're wrapping the entire string
-            action_input_str = action_input_str[1:-1].strip()
-        elif action_input_str.startswith('"') and action_input_str.endswith('"'):
-            # Remove double quotes if they're wrapping the entire string
-            action_input_str = action_input_str[1:-1].strip()
+        else:
+            # Clean up action input
+            action_input_str = action_input_raw.split("\n")[0].strip() if action_input_raw else ""
+            
+            # If the input contains explanations in parentheses, only take the part before that
+            if "(" in action_input_str:
+                action_input_str = action_input_str.split("(")[0].strip()
+            
+            # Handle special cases for empty/null inputs
+            if not action_input_str or action_input_str.lower() in ["(empty string)", "empty string", "''", '""', 
+                                                               "no input", "none", "null", "empty"]:
+                action_input_str = ""
+            elif action_input_str.startswith("'") and action_input_str.endswith("'"):
+                # Remove single quotes if they're wrapping the entire string
+                action_input_str = action_input_str[1:-1].strip()
+            elif action_input_str.startswith('"') and action_input_str.endswith('"'):
+                # Remove double quotes if they're wrapping the entire string
+                action_input_str = action_input_str[1:-1].strip()
         
         # Final validation to normalize the result
         tool_input_for_invocation = action_input_str.strip()
@@ -112,18 +121,31 @@ def parse_llm_output(llm_output: str) -> dict:
             "thought": thought
         }
     
-    # If we can't find clear Action/Final Answer patterns but there's explicit Thought text
-    thought_only_match = re.search(r"Thought:(.*)", llm_output, re.DOTALL | re.IGNORECASE)
-    if thought_only_match:
-        # Explicit thought without action - we'll extract it
-        thought = thought_only_match.group(1).strip()
-    else:
-        # No explicit thought pattern - treat whole text as thought
-        thought = llm_output.strip()
+    # If we can't find action, try to extract just the thought
+    # This could be a thinking step before the action
+    thought = llm_output.strip()
+    
+    # If the output looks like a structured plan or reasoning, and ends with a clear tool indication
+    # but not formatted as "Action: ToolName", try to extract that
+    tool_names = ["GitStatus", "GitCurrentBranch", "GitCreateBranch", "GitAddCommit", "GitPull", "GitLogShort", "GitPush", "Terminal"]
+    for tool_name in tool_names:
+        if llm_output.strip().endswith(tool_name):
+            return {
+                "type": "action",
+                "tool_call": ToolInvocation(tool=tool_name, tool_input=""),
+                "thought": llm_output.strip()[:-len(tool_name)].strip()
+            }
+        # Also check for "Let's use [tool_name]" pattern at the end
+        if re.search(rf"Let's use {tool_name}\s*$", llm_output, re.IGNORECASE):
+            return {
+                "type": "action",
+                "tool_call": ToolInvocation(tool=tool_name, tool_input=""),
+                "thought": re.sub(rf"Let's use {tool_name}\s*$", "", llm_output, flags=re.IGNORECASE).strip()
+            }
     
     # Check if the output looks more like a conversational response 
     # (doesn't follow ReAct format at all and is more than a few words)
-    if len(llm_output.split()) > 5 and "Action:" not in llm_output and "Final Answer:" not in llm_output:
+    if len(llm_output.split()) > 5:
         # Just treat it as a final answer
         return {"type": "finish", "return_values": {"output": llm_output.strip()}, "thought": thought}
     
