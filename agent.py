@@ -131,12 +131,17 @@ def main():
         handle_parsing_errors=True,
         agent_kwargs={
             'prefix': (
-                "You are a precise and helpful AI assistant designed to operate within a macOS terminal. "
+                "You are a precise and helpful AI assistant for the macOS terminal. "
                 "Your main goal is to assist the user with terminal commands, Git operations, and file system tasks. "
-                "When using a tool that requires input, provide the Action and then the Action Input on separate lines. "
-                "If a tool takes no input (like GitStatus or GitCurrentBranch), you can provide an empty string for the Action Input. "
+                "1. Understand the user's request. "
+                "2. Choose the single best tool to gather the necessary information or perform the action. "
+                "3. Execute the tool with the correct input. "
+                "4. OBSERVE the result. "
+                "5. If the observation directly answers the user's request, provide the Final Answer immediately based on that observation. "
+                "6. If more steps are needed, repeat from step 2. "
                 "CRITICAL INSTRUCTION: For Git operations (status, branch checking/creation, committing), you MUST prioritize using the specialized Git tools "
-                "(GitStatus, GitCurrentBranch, GitCreateBranch, GitAddCommit) over the general 'Terminal' tool. Only use 'Terminal' for Git commands if NO specialized tool fits the exact need."
+                "(GitStatus, GitCurrentBranch, GitCreateBranch, GitAddCommit) over the general 'Terminal' tool. Only use 'Terminal' for Git commands if NO specialized tool fits the exact need. "
+                "Provide your response directly and concisely after the thought process."
             )
         }
     )
