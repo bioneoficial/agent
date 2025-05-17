@@ -1,10 +1,115 @@
 import subprocess
 import sys # For handling command-line arguments
 import shlex # For safely splitting command strings
+import re # For parsing LLM output
 from langchain_ollama.chat_models import ChatOllama
 from langchain.agents import initialize_agent, Tool
 from langchain.agents.agent_types import AgentType
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, BaseMessage, AIMessage
+from langchain_core.agents import AgentAction, AgentFinish
+# from langchain_core.tools import ToolInvocation # Old problematic import
+
+# LangGraph imports
+from typing import TypedDict, Annotated, Sequence, List, Dict, Any, Union
+import operator
+from langgraph.graph import StateGraph, END
+from langchain_core.tools import BaseTool
+
+# Custom tool invocation and executor classes
+class ToolInvocation:
+    """A simple class to represent a tool invocation request."""
+    
+    def __init__(self, tool: str, tool_input: Any = None):
+        """
+        Initialize a tool invocation.
+        
+        Args:
+            tool: The name of the tool to invoke
+            tool_input: The input to pass to the tool
+        """
+        self.tool = tool
+        self.tool_input = tool_input
+
+class ToolExecutor:
+    """Simple tool executor that invokes a tool with arguments."""
+    
+    def __init__(self, tools: List[BaseTool]):
+        self.tools_dict = {tool.name: tool for tool in tools}
+    
+    def invoke(self, tool_invocation: ToolInvocation) -> str:
+        """Invoke a tool with the provided invocation."""
+        if not isinstance(tool_invocation, ToolInvocation):
+            raise ValueError(f"Expected ToolInvocation, got {type(tool_invocation)}")
+            
+        tool_name = tool_invocation.tool
+        if tool_name not in self.tools_dict:
+            return f"Error: Tool '{tool_name}' not found. Available tools: {list(self.tools_dict.keys())}"
+            
+        tool = self.tools_dict[tool_name]
+        try:
+            # Handle both string and dict inputs for tools
+            result = tool.invoke(tool_invocation.tool_input)
+            return str(result)
+        except Exception as e:
+            return f"Error executing tool '{tool_name}': {str(e)}"
+
+# --- Agent State Definition for LangGraph ---
+class AgentState(TypedDict):
+    input: str
+    chat_history: Annotated[Sequence[BaseMessage], operator.add]
+    agent_outcome: Annotated[list, operator.add] # Stores (AgentAction/AgentFinish, Observation/FinalOutput) tuples or raw LLM thought strings
+    # Novos campos para decisão do LLM:
+    next_action: ToolInvocation | None # Estrutura para chamada de ferramenta
+    final_response: str | None # Resposta final direta do LLM
+    error: bool # Flag para indicar se ocorreu um erro de parsing ou execução
+    error_message: str | None # Mensagem de erro
+
+# --- Parser Function ---
+def parse_llm_output(llm_output: str) -> dict:
+    """Parses the LLM ReAct style output to find Action, Action Input or Final Answer."""
+    # Tenta encontrar Final Answer
+    final_answer_match = re.search(r"Final Answer:(.*)", llm_output, re.DOTALL | re.IGNORECASE)
+    if final_answer_match:
+        return {"type": "finish", "return_values": {"output": final_answer_match.group(1).strip()}}
+
+    # Tenta encontrar Action e Action Input
+    # Regex ajustado para ser mais flexível com newlines e capturar o pensamento também.
+    # Pensamento é o texto antes de "Action:"
+    thought_action_match = re.search(r"(.*?)(Action:\s*(.*?)\n+Action Input:\s*(.*))", llm_output, re.DOTALL | re.IGNORECASE)
+    if thought_action_match:
+        thought = thought_action_match.group(1).strip()
+        action = thought_action_match.group(3).strip()
+        action_input_str = thought_action_match.group(4).strip()
+        
+        # O input da ferramenta para Langchain ToolExecutor é uma string única ou um dict.
+        # Nossas ferramentas atuais esperam uma string.
+        # Se action_input_str for "", None, ou apenas espaços, passe uma string vazia para a ferramenta.
+        # A lógica da ferramenta (ex: git_push_command) deve lidar com input vazio se apropriado.
+        tool_input_for_invocation = action_input_str if action_input_str.strip() else ""
+
+        return {
+            "type": "action", 
+            "tool_call": ToolInvocation(tool=action, tool_input=tool_input_for_invocation), 
+            "thought": thought
+        }
+    
+    # If we can't find clear Action/Final Answer patterns but there's explicit Thought text
+    thought_only_match = re.search(r"Thought:(.*)", llm_output, re.DOTALL | re.IGNORECASE)
+    if thought_only_match:
+        # Explicit thought without action - we'll extract it
+        thought = thought_only_match.group(1).strip()
+    else:
+        # No explicit thought pattern - treat whole text as thought
+        thought = llm_output.strip()
+    
+    # Check if the output looks more like a conversational response 
+    # (doesn't follow ReAct format at all and is more than a few words)
+    if len(llm_output.split()) > 5 and "Action:" not in llm_output and "Final Answer:" not in llm_output:
+        # Just treat it as a final answer
+        return {"type": "finish", "return_values": {"output": llm_output.strip()}, "thought": thought}
+    
+    # If we get here, it's either a parsing error or just a thought without action
+    return {"type": "error", "message": f"Could not parse LLM output for action or final answer: {llm_output}", "thought": thought}
 
 # --- Funções de Execução de Comandos ---
 
@@ -104,11 +209,226 @@ def git_push_command(branch_name: str = None) -> str:
         sanitized_branch_name = branch_name.strip()
         return execute_direct_command(["git", "push", "origin", sanitized_branch_name])
 
+# --- LangGraph Nodes ---
+
+llm_model = None
+agent_tools_list_global = []
+agent_prefix_prompt_global = ""
+tool_executor_global = None # Placeholder para o ToolExecutor global
+
+def call_model(state: AgentState) -> dict:
+    """Invokes the LLM to decide the next action or provide a final response."""
+    global llm_model, agent_tools_list_global, agent_prefix_prompt_global # Declarar que usaremos as globais
+    print("---CALLING MODEL---")
+    
+    # Construir o scratchpad a partir do agent_outcome
+    # Cada item em agent_outcome pode ser um AgentAction com sua Observation, ou um AgentFinish.
+    scratchpad_parts = []
+    for outcome_item in state["agent_outcome"]:
+        if isinstance(outcome_item, tuple) and len(outcome_item) == 2:
+            action, observation = outcome_item
+            if isinstance(action, AgentAction):
+                 scratchpad_parts.append(f"{action.log}\nObservation: {str(observation)}")
+            elif isinstance(action, str): # Caso seja um pensamento puro inicial
+                scratchpad_parts.append(action) # Adiciona o pensamento diretamente
+        else: #Fallback se o formato não for o esperado
+            scratchpad_parts.append(str(outcome_item))
+    scratchpad_content = "\n".join(scratchpad_parts)
+
+    current_input = state["input"]
+    
+    # Formato do prompt para ReAct
+    # Adicionar o histórico de chat também, se houver, antes do scratchpad.
+    # Por enquanto, o histórico de chat está implícito no agent_outcome se o reformarmos.
+    # A AgentState tem chat_history, mas não estamos usando explicitamente para construir o prompt ReAct ainda.
+    # O prefixo já pede para o LLM seguir o formato Thought/Action/Action Input/Observation/Final Answer
+
+    prompt_template = (
+        f"{agent_prefix_prompt_global}\n\n"
+        "TOOLS:\n"
+        "------\n"
+        "{tools_description}\n"
+        "TOOL NAMES: {tool_names}\n\n"
+        "HISTORY OF PREVIOUS ACTIONS AND OBSERVATIONS (scratchpad):\n"
+        "---------------------------------------------------------\n"
+        "{agent_scratchpad}\n\n"
+        "USER'S CURRENT REQUEST:\n"
+        "-----------------------\n"
+        "{input}\n\n"
+        "Thought:"
+    )
+
+    tools_description = "\n".join([f"- {tool.name}: {tool.description}" for tool in agent_tools_list_global])
+    tool_names = ", ".join([tool.name for tool in agent_tools_list_global])
+
+    full_prompt_text = prompt_template.format(
+        tools_description=tools_description,
+        tool_names=tool_names,
+        agent_scratchpad=scratchpad_content,
+        input=current_input
+    )
+
+    print(f"Generated prompt for LLM:\n{full_prompt_text[-1000:]}") # Mostra os últimos 1000 chars do prompt
+
+    updated_state = {}
+    try:
+        # A mensagem do LLM deve ser do tipo AIMessage se estivermos usando ChatOllama
+        ai_message = llm_model.invoke(full_prompt_text)
+        llm_output_text = ai_message.content if hasattr(ai_message, 'content') else str(ai_message)
+        print(f"LLM Raw Output: {llm_output_text}")
+
+        parsed_output = parse_llm_output(llm_output_text)
+        thought_text = parsed_output.get("thought", llm_output_text if not parsed_output.get("type") == "action" else "") # Pega o pensamento ou o output bruto se não houver ação
+
+        if parsed_output["type"] == "finish":
+            final_output = parsed_output["return_values"]["output"]
+            # Adiciona o pensamento final e a resposta final ao agent_outcome
+            updated_state["agent_outcome"] = state["agent_outcome"] + [(AgentFinish(return_values=parsed_output["return_values"], log=f"Thought: {thought_text}\nFinal Answer: {final_output}"), final_output)]
+            updated_state["final_response"] = final_output
+            updated_state["next_action"] = None
+            updated_state["error"] = False
+        elif parsed_output["type"] == "action":
+            tool_call = parsed_output["tool_call"]
+            # Adiciona o pensamento e a ação ao agent_outcome
+            # A observação será adicionada pelo nó da ferramenta
+            action_log = f"Thought: {thought_text}\nAction: {tool_call.tool}\nAction Input: {tool_call.tool_input}"
+            updated_state["agent_outcome"] = state["agent_outcome"] + [(AgentAction(tool=tool_call.tool, tool_input=tool_call.tool_input, log=action_log), None)] # None para observação, será preenchido depois
+            updated_state["next_action"] = tool_call
+            updated_state["final_response"] = None
+            updated_state["error"] = False
+        else: # Error
+            error_msg = parsed_output.get("message", "Unknown parsing error")
+            # Adiciona o pensamento (ou output bruto) e a mensagem de erro ao agent_outcome
+            updated_state["agent_outcome"] = state["agent_outcome"] + [(f"Thought: {thought_text}\nParsing Error: {error_msg}", error_msg)]
+            updated_state["final_response"] = None # Ou uma mensagem de erro para o usuário
+            updated_state["next_action"] = None
+            updated_state["error"] = True
+            updated_state["error_message"] = error_msg
+            print(f"Parsing Error: {error_msg}")
+
+    except Exception as e:
+        error_msg = f"Error calling LLM or parsing output: {str(e)}"
+        print(error_msg)
+        updated_state["agent_outcome"] = state["agent_outcome"] + [("LLM/Parsing Exception", error_msg)]
+        updated_state["final_response"] = None
+        updated_state["next_action"] = None
+        updated_state["error"] = True
+        updated_state["error_message"] = error_msg
+    
+    return updated_state
+
+def execute_tool_node(state: AgentState) -> dict:
+    """Executes the tool specified in next_action and returns the observation."""
+    global tool_executor_global
+    print("---EXECUTING TOOL NODE---")
+    action_to_execute = state.get("next_action") # Renomeado para evitar conflito com AgentAction import
+
+    if action_to_execute is None:
+        print("No action to execute in execute_tool_node.")
+        return {"error": True, "error_message": "execute_tool_node called with no next_action"}
+
+    if not isinstance(action_to_execute, ToolInvocation):
+        print(f"Error: next_action is not a ToolInvocation: {action_to_execute}")
+        return {"error": True, "error_message": f"next_action is not a ToolInvocation: {action_to_execute}"}
+
+    print(f"Executing tool: {action_to_execute.tool} with input: {action_to_execute.tool_input}")
+    updated_agent_outcome = list(state["agent_outcome"]) # Criar cópia para modificar
+    
+    try:
+        observation = tool_executor_global.invoke(action_to_execute)
+        print(f"Tool Observation: {observation}")
+
+        if updated_agent_outcome:
+            last_outcome_item = updated_agent_outcome[-1]
+            if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
+                # Atualiza a observação para a AgentAction correspondente
+                updated_agent_outcome[-1] = (last_outcome_item[0], str(observation))
+            else:
+                # Fallback: adiciona a observação como um novo item (menos ideal, indica problema na lógica anterior)
+                updated_agent_outcome.append((f"UnexpectedObservationFor_{action_to_execute.tool}", str(observation)))
+                print(f"Warning: Added observation for {action_to_execute.tool} as a new item, check agent_outcome structure.")
+        else:
+             # Fallback extremo: agent_outcome estava vazio, o que não deveria ocorrer após call_model
+             updated_agent_outcome.append((f"DirectObservationFor_{action_to_execute.tool}", str(observation)))
+             print("Warning: agent_outcome was empty before adding tool observation. This is unexpected.")
+
+        return {
+            "agent_outcome": updated_agent_outcome,
+            "next_action": None, # Limpa a ação após execução
+            "final_response": None, # Garante que não haja resposta final neste passo
+            "error": False,
+            "error_message": None
+        }
+    except Exception as e:
+        error_msg = f"Error executing tool {action_to_execute.tool}: {str(e)}"
+        print(error_msg)
+        
+        if updated_agent_outcome:
+            last_outcome_item = updated_agent_outcome[-1]
+            if isinstance(last_outcome_item, tuple) and len(last_outcome_item) == 2 and isinstance(last_outcome_item[0], AgentAction) and last_outcome_item[1] is None:
+                # Atualiza a observação da AgentAction com a mensagem de erro
+                updated_agent_outcome[-1] = (last_outcome_item[0], f"ToolExecutionError: {error_msg}")
+            else:
+                updated_agent_outcome.append((f"ToolExecutionErrorLog_{action_to_execute.tool}", error_msg))
+        else:
+            updated_agent_outcome.append((f"DirectToolExecutionError_{action_to_execute.tool}", error_msg))
+            
+        return {
+            "agent_outcome": updated_agent_outcome,
+            "next_action": None, 
+            "final_response": None,
+            "error": True, 
+            "error_message": error_msg
+        }
+
+def should_continue_router(state: AgentState) -> str:
+    """Determines the next step after the LLM has made a decision or a tool has run."""
+    print("---ROUTING LOGIC (should_continue_router)---")
+    
+    # Primeiro, checa se o nó anterior (call_model ou execute_tool_node) sinalizou um erro.
+    if state.get("error"): # Prioriza o erro já sinalizado
+        error_msg = state.get("error_message", "Unknown error flagged by previous node.")
+        print(f"Router: Error flagged by previous node. Routing to END_ERROR. Message: {error_msg}")
+        return "end_error" 
+
+    # Se o call_model gerou uma resposta final
+    if state.get("final_response") is not None:
+        print("Router: Final response is present. Routing to END_CONVERSATION.")
+        return "end_conversation"
+        
+    # Se o call_model decidiu por uma próxima ação (ferramenta)
+    if state.get("next_action") is not None:
+        if isinstance(state.get("next_action"), ToolInvocation):
+            print("Router: Next action (ToolInvocation) is present. Routing to EXECUTE_TOOL.")
+            return "continue_tool"
+        else:
+            # Isso indica um problema no call_model, que deveria ter setado um ToolInvocation válido ou None.
+            state["error"] = True
+            state["error_message"] = "Router Error: next_action was set by call_model, but it's not a valid ToolInvocation."
+            print(f"Router: {state['error_message']}. Routing to END_ERROR.")
+            return "end_error"
+
+    # Fallback: Se não há erro, nem resposta final, nem próxima ação. 
+    # Isso significa que o call_model não conseguiu decidir o que fazer ou o fluxo está incorreto.
+    # Ou, se este router for chamado após execute_tool_node, e execute_tool_node não setou erro mas também não levou a uma final_response (o que é esperado, pois execute_tool_node leva de volta ao call_model)
+    # A lógica principal é: após `call_model`, este router decide. Se for para `execute_tool_node`, então após `execute_tool_node`, o fluxo *sempre* volta para `call_model`.
+    # Portanto, se estamos aqui e não há `final_response` nem `next_action`, e viemos de `call_model`, é um problema no `call_model`.
+    state["error"] = True 
+    state["error_message"] = "Router Fallback: No final_response, no valid next_action, and no prior error flag after call_model. LLM might have failed to produce a valid plan."
+    print(f"Router: {state['error_message']}. Routing to END_ERROR.")
+    return "end_error"
+
 def main():
+    global llm_model, agent_tools_list_global, agent_prefix_prompt_global, tool_executor_global
+
     print(f"Loading Ollama LLM (llama3:8b) as ChatModel...")
     try:
-        llm = ChatOllama(model="llama3:8b")
-        llm.invoke("Hello, are you working?")
+        # Renomear a variável local para não sombrear a global, ou atribuir diretamente
+        local_llm = ChatOllama(model="llama3:8b")
+        local_llm.invoke("Hello, are you working?") # Test call
+        llm_model = local_lll = ChatOllama(model="llama3:8b")
+        local_llm.invoke("Hello, are you working?") # Test call
+        llm_model = local_llm # Atribuir à global
         print("Ollama ChatModel loaded successfully.")
     except Exception as e:
         print(f"Error loading Ollama ChatModel: {e}")
@@ -188,82 +508,157 @@ def main():
             ),
         ),
     ]
+    agent_tools_list_global = tools # Atribuir à global
 
-    print("Initializing agent...")
-    agent = initialize_agent(
-        tools,
-        llm,
-        agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-        verbose=True,
-        handle_parsing_errors=True,
-        max_iterations=10, 
-        early_stopping_method="generate",
-        agent_kwargs={
-            'prefix': (
-                "You are a precise and helpful AI assistant for the macOS terminal. "
-                "Your main goal is to assist the user with terminal commands, Git operations, and file system tasks. "
-                "Follow these steps strictly for each user request: "
-                "1. Thought: Understand the user's specific request and plan your action. Consider if all necessary information (like a branch name for a push) is available or if you need to ask the user first. "
-                "2. Action: On a new line, write the name of the single best specialized tool for the task if one exists (e.g., GitStatus, GitPush). "
-                "   If no specialized tool fits, and the task is a general terminal command, use the 'Terminal' tool. "
-                "3. Action Input: On the very next line, write the input required by the chosen tool. "
-                "   - If the tool takes no input (like GitStatus), write an empty string: '' or 'no input'. "
-                "   - For the 'Terminal' tool: the Action Input MUST be *exclusively* the exact shell command string required for the task (e.g., 'ls -la', 'rm my_file.txt', 'echo \"text\" > new.txt'). ABSOLUTELY NO other text, such as your own explanations, reasoning, or conversational remarks, should be included in the Action Input for the Terminal tool. "
-                "   - For tools like GitCreateBranch, GitAddCommit, or GitPush (when a branch is specified), the Action Input MUST be *only* the value itself (e.g., 'feature/new-thing' or 'Initial commit'). Do NOT add any extra words, newlines, or conversational text. "
-                "   - If GitPush is used for a simple push (current branch to its upstream without specifying a branch name explicitly), the Action Input line should be empty after 'Action Input:' (i.e., just a newline character), which will pass an empty string or None to the tool. "
-                "4. OBSERVE: After the tool executes, you will receive an Observation. "
-                "5. CRITICAL: If the Observation indicates successful execution OR directly and fully answers the user's request, your response MUST be ONLY: "
-                "   Thought: I have the answer or the action is complete. "
-                "   Final Answer: [Provide the direct answer or confirmation here]. "
-                "   Do not take further unnecessary actions. "
-                "6. If the Observation indicates an error OR if more steps are truly needed (e.g., a command requires an argument you don't have yet), then your Thought should explain this. "
-                "   If your plan is to ask the user for more information: "
-                "     a. Your response for this turn MUST be ONLY a Thought explaining why you need to ask, followed by a Final Answer containing ONLY the direct question to the user. "
-                "     b. CRITICALLY: You MUST NOT use any 'Action:' or any tool in this turn. Your ONLY output is the Thought and the Final Answer (the question). Any other tool use at this stage is a failure to follow instructions. "
-                "   Then stop and wait for the user's response. Do not try to invent information. "
-                "7. CONTEXT HANDLING: If your previous 'Final Answer' was a question to the user, and the new user input appears to be the answer to that question, you MUST use this new information to attempt to complete the ORIGINAL task or goal. Do not treat the user's answer as a new, unrelated command unless it's clearly a change of topic. Re-evaluate the original goal with this new information. "
-                "Example - User asks to push, but doesn't specify branch: "
-                "Thought: The user wants to push commits. A simple 'git push' might work, or I might need to specify 'origin <branch>'. I will try a simple push first by providing an empty Action Input to GitPush. "
-                "Action: GitPush "
-                "Action Input: "
-                "(after observation, if error indicates branch is needed) "
-                "Thought: The push failed because the upstream is not set or is ambiguous. I need to ask the user for the specific branch name they want to push to. "
-                "Final Answer: Which branch would you like to push to origin? "
-                "Example - User then responds with 'my-feature-branch': "
-                "Thought: The user has provided 'my-feature-branch' as the answer to my question about which branch to push to. I will now attempt to push to this branch. "
-                "Action: GitPush "
-                "Action Input: my-feature-branch "
-                "Be concise and direct in your Final Answer or question to the user."
-            )
+    tool_executor = ToolExecutor(tools)
+    tool_executor_global = tool_executor # Atribui o tool_executor global
+
+    # Definir o prefixo do agente que será usado no call_model
+    # Este é o mesmo prefixo que usávamos para o initialize_agent
+    current_agent_prefix = (
+        "You are a precise and helpful AI assistant for the macOS terminal. "
+        "Your main goal is to assist the user with terminal commands, Git operations, and file system tasks. "
+        "Follow these steps strictly for each user request: "
+        "1. Thought: Understand the user's specific request and plan your action. Consider if all necessary information (like a branch name for a push) is available or if you need to ask the user first. "
+        "2. Action: On a new line, write the name of the single best specialized tool for the task if one exists (e.g., GitStatus, GitPush). "
+        "   If no specialized tool fits, and the task is a general terminal command, use the 'Terminal' tool. "
+        "3. Action Input: On the very next line, write the input required by the chosen tool. "
+        "   - If the tool takes no input (like GitStatus), write an empty string: '' or 'no input'. "
+        "   - For the 'Terminal' tool: the Action Input MUST be *exclusively* the exact shell command string required for the task (e.g., 'ls -la', 'rm my_file.txt', 'echo \"text\" > new.txt'). ABSOLUTELY NO other text, such as your own explanations, reasoning, or conversational remarks, should be included in the Action Input for the Terminal tool. "
+        "   - For tools like GitCreateBranch, GitAddCommit, or GitPush (when a branch is specified), the Action Input MUST be *only* the value itself (e.g., 'feature/new-thing' or 'Initial commit'). Do NOT add any extra words, newlines, or conversational text. "
+        "   - If GitPush is used for a simple push (current branch to its upstream without specifying a branch name explicitly), the Action Input line should be empty after 'Action Input:' (i.e., just a newline character), which will pass an empty string or None to the tool. "
+        "4. OBSERVE: After the tool executes, you will receive an Observation. "
+        "5. CRITICAL: If the Observation indicates successful execution OR directly and fully answers the user's request, your response MUST be ONLY: "
+        "   Thought: I have the answer or the action is complete. "
+        "   Final Answer: [Provide the direct answer or confirmation here]. "
+        "   Do not take further unnecessary actions. "
+        "6. If the Observation indicates an error OR if more steps are truly needed (e.g., a command requires an argument you don't have yet), then your Thought should explain this. "
+        "   If your plan is to ask the user for more information: "
+        "     a. Your response for this turn MUST be ONLY a Thought explaining why you need to ask, followed by a Final Answer containing ONLY the direct question to the user. "
+        "     b. CRITICALLY: You MUST NOT use any 'Action:' or any tool in this turn. Your ONLY output is the Thought and the Final Answer (the question). Any other tool use at this stage is a failure to follow instructions. "
+        "   Then stop and wait for the user's response. Do not try to invent information. "
+        "7. CONTEXT HANDLING: If your previous 'Final Answer' was a question to the user, and the new user input appears to be the answer to that question, you MUST use this new information to attempt to complete the ORIGINAL task or goal. Do not treat the user's answer as a new, unrelated command unless it's clearly a change of topic. Re-evaluate the original goal with this new information. "
+        "Example - User asks to push, but doesn't specify branch: "
+        "Thought: The user wants to push commits. A simple 'git push' might work, or I might need to specify 'origin <branch>'. I will try a simple push first by providing an empty Action Input to GitPush. "
+        "Action: GitPush "
+        "Action Input: "
+        "(after observation, if error indicates branch is needed) "
+        "Thought: The push failed because the upstream is not set or is ambiguous. I need to ask the user for the specific branch name they want to push to. "
+        "Final Answer: Which branch would you like to push to origin? "
+        "Example - User then responds with 'my-feature-branch': "
+        "Thought: The user has provided 'my-feature-branch' as the answer to my question about which branch to push to. I will now attempt to push to this branch. "
+        "Action: GitPush "
+        "Action Input: my-feature-branch "
+        "Be concise and direct in your Final Answer or question to the user."
+    )
+    agent_prefix_prompt_global = current_agent_prefix # Atribuir à global
+
+    print("Initializing LangGraph workflow...")
+    workflow = StateGraph(AgentState)
+
+    # Adicionar nós
+    workflow.add_node("agent_llm", call_model) 
+    workflow.add_node("tool_executor", execute_tool_node)
+
+    # Definir o ponto de entrada
+    workflow.set_entry_point("agent_llm")
+
+    # Adicionar arestas condicionais do nó do agente (LLM)
+    workflow.add_conditional_edges(
+        "agent_llm",
+        should_continue_router,
+        {
+            "continue_tool": "tool_executor",
+            "end_conversation": END,
+            "end_error": END,
         }
     )
-    print("Agent initialized.")
-    
+
+    # Adicionar aresta de volta do executor da ferramenta para o agente
+    workflow.add_edge("tool_executor", "agent_llm")
+
+    # Compilar o grafo
+    app = workflow.compile()
+    print("LangGraph workflow compiled.")
+
     if len(sys.argv) > 1:
         initial_command = " ".join(sys.argv[1:])
-        print(f"Executing initial command: {initial_command}")
+        print(f"Executing initial command with LangGraph: {initial_command}")
+        initial_state = AgentState(
+            input=initial_command, 
+            agent_outcome=[], 
+            chat_history=[], 
+            next_action=None, 
+            final_response=None, 
+            error=False, 
+            error_message=None
+        )
         try:
-            response_dict = agent.invoke({"input": initial_command})
-            print(f"\nAssistant:\n{response_dict.get('output')}")
+            # Invocar o grafo LangGraph
+            final_state = app.invoke(initial_state)
+            print("\n--- LangGraph Final State ---")
+            # Acessar a resposta final ou a última mensagem do agent_outcome
+            if final_state.get("final_response"):
+                print(f"Assistant: {final_state["final_response"]}")
+            elif final_state.get("error"):
+                print(f"Assistant Error: {final_state.get('error_message', 'Unknown error')}")
+            else:
+                print("Assistant: (No final response, check agent_outcome for details)")
+            # print(f"Full final state: {final_state}") # Para depuração completa
+
         except Exception as e:
-            print(f"Agent execution failed: {e}")
+            print(f"LangGraph execution failed: {e}")
+            import traceback
+            traceback.print_exc()
     else:
-        print("\nWelcome to your macOS AI Terminal Assistant!")
+        print("\nWelcome to your macOS AI Terminal Assistant (LangGraph Edition)!")
         print("Type 'exit' or 'quit' to leave.")
+        current_chat_history = [] # Manter histórico para o loop interativo
         while True:
             try:
-                user_input = input("(venv) macOS-AI> ")
+                user_input = input("(venv) macOS-AI-LG> ")
                 if user_input.lower() in ["exit", "quit"]:
                     print("Exiting assistant...")
                     break
                 if user_input:
-                    response_dict = agent.invoke({"input": user_input})
-                    print(f"\nAssistant:\n{response_dict.get('output')}")
+                    current_state_input = AgentState(
+                        input=user_input, 
+                        # agent_outcome precisa ser o scratchpad da última execução ou similar.
+                        # Por enquanto, vamos resetar o agent_outcome a cada turno no modo interativo,
+                        # mas o chat_history acumulará as mensagens Humanas e AI (se final_response for uma).
+                        agent_outcome=[], # Resetar scratchpad para este turno
+                        chat_history=list(current_chat_history), # Passar cópia do histórico acumulado
+                        next_action=None, 
+                        final_response=None, 
+                        error=False, 
+                        error_message=None
+                    )
+                    final_state = app.invoke(current_state_input)
+                    
+                    print("\n--- LangGraph Turn Final State ---")
+                    final_response_text = None
+                    if final_state.get("final_response"):
+                        final_response_text = final_state["final_response"]
+                        print(f"Assistant: {final_response_text}")
+                        # Adicionar input do usuário e resposta da AI ao histórico
+                        current_chat_history.append(HumanMessage(content=user_input))
+                        current_chat_history.append(AIMessage(content=final_response_text))
+                    elif final_state.get("error"):
+                        error_message_text = final_state.get('error_message', 'Unknown error')
+                        print(f"Assistant Error: {error_message_text}")
+                        # Não adicionar ao histórico de chat bem-sucedido se houve erro crítico
+                    else:
+                        print("Assistant: (No final response, graph might have ended unexpectedly or in error. Check logs.)")
+                    # print(f"Full final state for turn: {final_state}") # Para depuração completa
+
             except KeyboardInterrupt:
                 print("\nExiting assistant due to user interrupt...")
                 break
             except Exception as e:
-                print(f"An error occurred during agent interaction: {e}")
+                print(f"An error occurred in the interactive loop: {e}")
+                import traceback
+                traceback.print_exc()
+                # Considere se quer quebrar o loop ou continuar
 
 if __name__ == "__main__":
     main() 
