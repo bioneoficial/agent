@@ -80,9 +80,44 @@ def parse_llm_output(llm_output: str) -> dict:
     if not action_pattern:
         action_pattern = re.search(r"Action:\s*(.*?)$", llm_output, re.DOTALL | re.IGNORECASE)
     
+    # Try to parse direct tool references like "Use GitPush"
+    tool_names = ["GitStatus", "GitCurrentBranch", "GitCreateBranch", "GitAddCommit", "GitPull", "GitLogShort", "GitPush", "Terminal"]
+    
+    # Special handling for "GitStatus" which is often mentioned in reasoning
+    git_status_pattern = re.search(r"(?:Run|Use|Execute|Check)\s+[`']?GitStatus[`']?", llm_output, re.IGNORECASE)
+    if git_status_pattern and not action_pattern:
+        return {
+            "type": "action",
+            "tool_call": ToolInvocation(tool="GitStatus", tool_input=""),
+            "thought": llm_output
+        }
+    
+    # Special handling for "GitPush" which is the goal of this command
+    git_push_pattern = re.search(r"(?:Run|Use|Execute|Do)\s+[`']?GitPush[`']?", llm_output, re.IGNORECASE)
+    if git_push_pattern and not action_pattern:
+        return {
+            "type": "action",
+            "tool_call": ToolInvocation(tool="GitPush", tool_input=""),
+            "thought": llm_output
+        }
+    
     if action_pattern:
         # Extract the tool name and input if available
-        action = action_pattern.group(1).strip()
+        action_raw = action_pattern.group(1).strip()
+        
+        # Clean up the action name - sometimes it contains full phrases like "Run GitStatus"
+        # Extract just the tool name using a regex
+        action_clean_match = re.search(r'(?:Run|Use|Execute)?\s*[`\'"]?((?:Git\w+|Terminal))[`\'"]?', action_raw, re.IGNORECASE)
+        action = action_clean_match.group(1) if action_clean_match else action_raw
+        
+        # Validate the extracted action is a known tool
+        if action not in tool_names:
+            # If not a known tool, see if we can find a tool name in the action text
+            for tool in tool_names:
+                if tool.lower() in action_raw.lower():
+                    action = tool
+                    break
+        
         action_input_raw = action_pattern.group(2).strip() if len(action_pattern.groups()) > 1 and action_pattern.group(2) else ""
         
         # Get all text before "Action:" as the thought
@@ -121,27 +156,19 @@ def parse_llm_output(llm_output: str) -> dict:
             "thought": thought
         }
     
+    # If the output contains structured steps that mention using GitStatus or GitPush, extract that
+    for tool_name in tool_names:
+        step_match = re.search(rf'(?:STEP \d+:|Step \d+:).*?{tool_name}', llm_output, re.IGNORECASE | re.DOTALL)
+        if step_match:
+            return {
+                "type": "action",
+                "tool_call": ToolInvocation(tool=tool_name, tool_input=""),
+                "thought": llm_output
+            }
+    
     # If we can't find action, try to extract just the thought
     # This could be a thinking step before the action
     thought = llm_output.strip()
-    
-    # If the output looks like a structured plan or reasoning, and ends with a clear tool indication
-    # but not formatted as "Action: ToolName", try to extract that
-    tool_names = ["GitStatus", "GitCurrentBranch", "GitCreateBranch", "GitAddCommit", "GitPull", "GitLogShort", "GitPush", "Terminal"]
-    for tool_name in tool_names:
-        if llm_output.strip().endswith(tool_name):
-            return {
-                "type": "action",
-                "tool_call": ToolInvocation(tool=tool_name, tool_input=""),
-                "thought": llm_output.strip()[:-len(tool_name)].strip()
-            }
-        # Also check for "Let's use [tool_name]" pattern at the end
-        if re.search(rf"Let's use {tool_name}\s*$", llm_output, re.IGNORECASE):
-            return {
-                "type": "action",
-                "tool_call": ToolInvocation(tool=tool_name, tool_input=""),
-                "thought": re.sub(rf"Let's use {tool_name}\s*$", "", llm_output, flags=re.IGNORECASE).strip()
-            }
     
     # Check if the output looks more like a conversational response 
     # (doesn't follow ReAct format at all and is more than a few words)
@@ -327,6 +354,12 @@ def call_model(state: AgentState) -> dict:
         "USER'S CURRENT REQUEST:\n"
         "-----------------------\n"
         "{input}\n\n"
+        "IMPORTANT FORMATTING INSTRUCTIONS:\n"
+        "When you decide to use a tool, clearly format your response like this:\n"
+        "- First provide your reasoning and thoughts\n"
+        "- Then on a new line, write 'Action: ToolName' (e.g., 'Action: GitStatus')\n"
+        "- For tools that need input, write 'Action Input: [input]' on the next line\n"
+        "- For tools that take no input, write 'Action Input: ' (leave it blank)\n\n"
         "When working with Git commands, first think about what state the repository is in and what the user wants to achieve. "
         "For push operations, consider: Are there uncommitted changes? Does the branch have upstream tracking set? "
         "For commit operations, are there changes to commit? "
