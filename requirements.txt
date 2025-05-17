@@ -12,6 +12,7 @@ langchain==0.3.25
 langchain-core==0.3.60
 langchain-ollama==0.3.3
 langchain-text-splitters==0.3.8
+langgraph==0.1.17
 langsmith==0.3.42
 ollama==0.4.8
 orjson==3.10.18
