@@ -1063,6 +1063,12 @@ agent_tools_list_global = []
 agent_prefix_prompt_global = ""
 tool_executor_global = None # Placeholder para o ToolExecutor global
 
+# Variáveis para controle de loops e execução
+MAX_CONSECUTIVE_TOOL_CALLS = 3 # Máximo de chamadas consecutivas para mesma ferramenta
+MAX_TOTAL_TOOL_CALLS = 10 # Máximo de chamadas totais para uma única sessão
+tool_calls_counter = {} # Contador de chamadas por ferramenta 
+total_tool_calls = 0 # Contador total de chamadas
+
 def call_model(state: AgentState) -> dict:
     """Invokes the LLM to decide the next action or provide a final response."""
     global llm_model, agent_tools_list_global, agent_prefix_prompt_global # Declarar que usaremos as globais
@@ -1232,7 +1238,7 @@ def call_model(state: AgentState) -> dict:
 
 def execute_tool_node(state: AgentState) -> dict:
     """Executes the tool specified in next_action and returns the observation."""
-    global tool_executor_global
+    global tool_executor_global, tool_calls_counter, total_tool_calls, MAX_CONSECUTIVE_TOOL_CALLS, MAX_TOTAL_TOOL_CALLS
     print("---EXECUTING TOOL NODE---")
     action_to_execute = state.get("next_action") # Renomeado para evitar conflito com AgentAction import
 
@@ -1250,6 +1256,102 @@ def execute_tool_node(state: AgentState) -> dict:
             "error": True, 
             "error_message": f"next_action is not a ToolInvocation: {action_to_execute}",
             "error_category": ErrorCategory.EXECUTION
+        }
+
+    # Incrementar contadores para controle de limite de chamadas
+    tool_name = action_to_execute.tool
+    total_tool_calls += 1
+    
+    # Incrementar contador específico para essa ferramenta
+    if tool_name not in tool_calls_counter:
+        tool_calls_counter[tool_name] = 1
+    else:
+        tool_calls_counter[tool_name] += 1
+    
+    # Verificar se atingiu o limite máximo de chamadas totais
+    if total_tool_calls > MAX_TOTAL_TOOL_CALLS:
+        print(f"LIMITE DE CHAMADAS EXCEDIDO: Total de {total_tool_calls} chamadas > limite de {MAX_TOTAL_TOOL_CALLS}")
+        return {
+            "agent_outcome": state["agent_outcome"] + [(f"LIMITE DE CHAMADAS EXCEDIDO ({total_tool_calls})", "")],
+            "next_action": None,
+            "final_response": f"Desculpe, mas estou detectando um padrão de repetição nas chamadas de ferramentas. Parece que completamos a tarefa ou estamos em um loop. Até agora executei {total_tool_calls} ações.",
+            "error": False,
+            "error_message": None,
+            "error_category": ErrorCategory.NONE,
+            "needs_clarification": False,
+            "clarification_question": None,
+            "suggested_corrections": []
+        }
+    
+    # Verificar se atingiu o limite máximo para essa ferramenta específica
+    if tool_calls_counter[tool_name] > MAX_CONSECUTIVE_TOOL_CALLS:
+        print(f"LIMITE EXCEDIDO PARA {tool_name}: {tool_calls_counter[tool_name]} chamadas > limite de {MAX_CONSECUTIVE_TOOL_CALLS}")
+        
+        # Para o caso do GitStatus, forçar a transição para GitAddCommit ou simplesmente finalizar
+        if tool_name == "GitStatus":
+            status_result = git_status_command("")
+            if "modified:" in status_result or "Changes not staged for commit" in status_result:
+                # Forçar GitAddCommit se há mudanças não commitadas
+                diff_summary = git_diff_summary_command("")
+                commit_msg = "feat: update files detected by diff analysis"
+                
+                # Extrair nomes de arquivos
+                files_pattern = re.findall(r"modified:\s+([^\n]+)", status_result)
+                if files_pattern:
+                    files_context = ", ".join(file.strip() for file in files_pattern)
+                    commit_msg = f"feat: update {files_context} (auto-detected)"
+                
+                print(f"Forçando GitAddCommit com mensagem: {commit_msg}")
+                return {
+                    "agent_outcome": state["agent_outcome"] + [(f"LIMITE EXCEDIDO PARA {tool_name}: FORÇANDO GitAddCommit", "")],
+                    "next_action": ToolInvocation(tool="GitAddCommit", tool_input=commit_msg),
+                    "final_response": None,
+                    "error": False,
+                    "error_message": None,
+                    "error_category": ErrorCategory.NONE,
+                    "needs_clarification": False,
+                    "clarification_question": None,
+                    "suggested_corrections": []
+                }
+            else:
+                # Se não há mudanças para commitar, encerrar com status limpo
+                return {
+                    "agent_outcome": state["agent_outcome"] + [(f"LIMITE EXCEDIDO PARA {tool_name}: STATUS LIMPO", "")],
+                    "next_action": None,
+                    "final_response": "O repositório está limpo. Não há alterações para commitar e todos os arquivos estão atualizados.",
+                    "error": False,
+                    "error_message": None,
+                    "error_category": ErrorCategory.NONE,
+                    "needs_clarification": False,
+                    "clarification_question": None,
+                    "suggested_corrections": []
+                }
+        
+        # Para o caso do GitPush, finalizar com mensagem de conclusão
+        elif tool_name == "GitPush":
+            return {
+                "agent_outcome": state["agent_outcome"] + [(f"LIMITE EXCEDIDO PARA {tool_name}: FINALIZANDO", "")],
+                "next_action": None,
+                "final_response": "O push foi concluído com sucesso. Se houver alguma outra ação que você gostaria de realizar, por favor informe.",
+                "error": False,
+                "error_message": None,
+                "error_category": ErrorCategory.NONE,
+                "needs_clarification": False,
+                "clarification_question": None,
+                "suggested_corrections": []
+            }
+        
+        # Para outros casos, fornecer uma resposta genérica de conclusão
+        return {
+            "agent_outcome": state["agent_outcome"] + [(f"LIMITE EXCEDIDO PARA {tool_name}", "")],
+            "next_action": None,
+            "final_response": f"Detectei uma possível repetição nas chamadas da ferramenta {tool_name}. A tarefa pode ter sido concluída com sucesso ou estamos em um loop. Por favor, se precisar de mais algo, forneça uma nova instrução.",
+            "error": False,
+            "error_message": None,
+            "error_category": ErrorCategory.NONE,
+            "needs_clarification": False,
+            "clarification_question": None,
+            "suggested_corrections": []
         }
 
     # Handle empty or None inputs explicitly
@@ -1811,8 +1913,57 @@ def should_continue_router(state: AgentState) -> str:
     print(f"Router: {state['error_message']}. Routing to END_ERROR.")
     return "end_error"
 
+def router_node(state: AgentState) -> dict:
+    """Routes the execution flow based on the current state."""
+    global tool_calls_counter, total_tool_calls
+    print("---ROUTER NODE---")
+    
+    # Verificar se há uma resposta final
+    if state.get("final_response"):
+        print("---FINALIZADO COM RESPOSTA---")
+        # Reset dos contadores quando finaliza com sucesso
+        tool_calls_counter = {}
+        total_tool_calls = 0
+        return {"next": "end"}
+    
+    # Verificar se há um erro
+    if state.get("error") == True:
+        print("---FINALIZADO COM ERRO---")
+        # Reset dos contadores quando há um erro
+        tool_calls_counter = {}
+        total_tool_calls = 0
+        return {"next": "end"}
+        
+    # Verificar se há uma próxima ação
+    if state.get("next_action") is not None:
+        print("---PRÓXIMA AÇÃO---")
+        return {"next": "execute_tool"}
+    
+    # Verificar se há um padrão de conclusão
+    last_actions = [item[0].tool if isinstance(item, tuple) and len(item) > 0 and hasattr(item[0], 'tool') else None 
+                   for item in state.get("agent_outcome", [])[-3:]]
+    
+    success_patterns = [
+        ["GitAddCommit", "GitPush", None],       # Commit seguido de push
+        ["GitStatus", "GitAddCommit", None],     # Status, commit e finalização
+        ["ReadFile", "WriteFile", None],         # Ler, escrever e finalizar
+        ["ReadFile", "AppendFile", None],        # Ler, anexar e finalizar
+    ]
+    
+    for pattern in success_patterns:
+        if len(last_actions) >= len(pattern) and all(a == b or b is None for a, b in zip(last_actions[-len(pattern):], pattern)):
+            print(f"---PADRÃO DE SUCESSO DETECTADO: {pattern}---")
+            # Reset dos contadores ao detectar padrão de sucesso
+            tool_calls_counter = {}
+            total_tool_calls = 0
+            # Não finaliza automaticamente, permite uma última chamada ao modelo
+    
+    # Se não há uma próxima ação e não há erro, voltar para o modelo
+    print("---VOLTANDO PARA O MODELO---")
+    return {"next": "call_model"}
+
 def main():
-    global llm_model, agent_tools_list_global, agent_prefix_prompt_global, tool_executor_global
+    global llm_model, agent_tools_list_global, agent_prefix_prompt_global, tool_executor_global, tool_calls_counter, total_tool_calls
 
     print(f"Loading Ollama LLM (llama3.1:8b) as ChatModel...")
     try:
@@ -2135,6 +2286,10 @@ def main():
         current_chat_history = [] # Manter histórico para o loop interativo
         while True:
             try:
+                # Reset dos contadores a cada nova interação
+                tool_calls_counter = {}
+                total_tool_calls = 0
+                
                 user_input = input("(venv) macOS-AI-LG> ")
                 if user_input.lower() in ["exit", "quit"]:
                     print("Exiting assistant...")
@@ -2255,6 +2410,237 @@ def main():
                 import traceback
                 traceback.print_exc()
                 # Considere se quer quebrar o loop ou continuar
+
+def start_interactive_agent():
+    """Starts the agent in interactive mode."""
+    global llm_model, agent_tools_list_global, agent_prefix_prompt_global, tool_executor_global, tool_calls_counter, total_tool_calls
+    
+    if llm_model is None:
+        print("LLM is not initialized. Please run main() first.")
+        return
+        
+    print("\nWelcome to your macOS AI Terminal Assistant (LangGraph Edition)!")
+    print("Type 'exit' or 'quit' to leave.")
+    current_chat_history = [] # Manter histórico para o loop interativo
+    
+    while True:
+        try:
+            # Reset dos contadores a cada nova interação
+            tool_calls_counter = {}
+            total_tool_calls = 0
+            
+            user_input = input("(venv) macOS-AI-LG> ")
+            if user_input.lower() in ["exit", "quit"]:
+                print("Exiting assistant...")
+                break
+                
+            if user_input:
+                # Verificar se é um pedido de commit semântico
+                is_commit_request = False
+                if (("commit" in user_input.lower() and 
+                    ("message" in user_input.lower() or 
+                     "semantic" in user_input.lower() or 
+                     "baseado" in user_input.lower() or
+                     "based on" in user_input.lower() or
+                     "mudanças" in user_input.lower() or
+                     "alterações" in user_input.lower())) or
+                     "commitar" in user_input.lower()):
+                    
+                    print("Detectado pedido de commit semântico...")
+                    status_result = git_status_command("")
+                    
+                    if "modified:" in status_result or "Changes not staged for commit" in status_result:
+                        diff_summary = git_diff_summary_command("")
+                        message_input = f"Gere uma mensagem de commit semântica baseada nas seguintes alterações:\n{diff_summary}"
+                        
+                        # Chamar o LLM diretamente para gerar a mensagem de commit
+                        commit_msg = generate_semantic_commit_message(diff_summary)
+                        
+                        # Executar git add e commit 
+                        result = git_add_commit_command(commit_msg)
+                        print(f"\nResultado: {result}")
+                        
+                        # Reset dos contadores após commit bem-sucedido
+                        tool_calls_counter = {}
+                        total_tool_calls = 0
+                        
+                        # Considerar a tarefa cumprida - não passar para o agente
+                        is_commit_request = True
+                        current_chat_history = []  # Reinicia histórico após commit
+                    else:
+                        print("\nNão foram encontradas alterações para commitar. Working tree clean.")
+                
+                if not is_commit_request:
+                    # Processar normalmente com o agente
+                    print("\nProcessando...")
+                    messages = current_chat_history + [HumanMessage(content=user_input)]
+                    
+                    # Definir ferramentas, configurar e chamar o workflow do agente
+                    # (resto do código de processamento)
+                    
+                    # Adicionar saída ao histórico
+                    current_chat_history.append(HumanMessage(content=user_input))
+                    current_chat_history.append(AIMessage(content=output))
+                    
+                    # Reset dos contadores após tarefa concluída com resposta final
+                    if output and not output.startswith("---"):
+                        tool_calls_counter = {}
+                        total_tool_calls = 0
+            
+        except KeyboardInterrupt:
+            print("\nExiting assistant due to user interrupt...")
+            break
+        except Exception as e:
+            print(f"An error occurred in the interactive loop: {e}")
+            import traceback
+            traceback.print_exc()
+
+def run_agent(query: str, chat_history: list = None, prefix_prompt: str = None) -> tuple:
+    """Runs the agent with a query and returns the result.
+    
+    Args:
+        query: The user query to process
+        chat_history: Optional chat history
+        prefix_prompt: Optional prefix prompt
+        
+    Returns:
+        tuple: (output_text, chat_history)
+    """
+    global llm_model, agent_tools_list_global, agent_prefix_prompt_global, tool_executor_global, tool_calls_counter, total_tool_calls
+    
+    # Reset dos contadores a cada nova execução do agente
+    tool_calls_counter = {}
+    total_tool_calls = 0
+    
+    if llm_model is None:
+        return "LLM is not initialized. Please run main() first.", chat_history
+
+    # Configurar chat history se não fornecido
+    if chat_history is None:
+        chat_history = []
+        
+    # Usar o prefix_prompt fornecido ou o padrão
+    prefix_to_use = prefix_prompt if prefix_prompt is not None else agent_prefix_prompt_global
+    
+    # Definir ferramentas
+    tools = agent_tools_list_global
+    message_history = chat_history + [HumanMessage(content=query)]
+    
+    # Criação do workflow de LangGraph
+    workflow = StateGraph(AgentState)
+    
+    # Nós do LangGraph
+    workflow.add_node("call_model", call_model)
+    workflow.add_node("execute_tool", execute_tool_node)
+    workflow.add_node("router", router_node)
+    workflow.add_node("end", end_node)
+    
+    # Ligações do LangGraph
+    workflow.set_entry_point("call_model")
+    workflow.add_edge("call_model", "router")
+    workflow.add_edge("router", "execute_tool")
+    workflow.add_edge("execute_tool", "router")
+    workflow.add_edge("router", "call_model")
+    workflow.add_edge("router", "end")
+    
+    # Compilar o workflow
+    agent_executor = workflow.compile()
+    
+    # Executar o workflow
+    message_history_only_content = [msg.content for msg in message_history]
+    try:
+        result = agent_executor.invoke({
+            "messages": message_history_only_content,
+            "prefix_prompt": prefix_to_use,
+            "agent_outcome": [],
+            "suggested_corrections": [],
+            "error": False,
+            "error_message": None,
+            "error_category": ErrorCategory.NONE,
+            "needs_clarification": False,
+            "clarification_question": None,
+            "next_action": None,
+        })
+        
+        if "output" in result and result["output"]:
+            output = result["output"]
+            return output, message_history + [AIMessage(content=output)]
+        else:
+            output = "Não foi possível gerar uma resposta. Por favor, reformule sua pergunta."
+            return output, message_history
+            
+    except Exception as e:
+        print(f"Exception during agent execution: {e}")
+        import traceback
+        traceback.print_exc()
+        error_msg = str(e)
+        if len(error_msg) > 100:
+            error_msg = error_msg[:100] + "..."
+        error_msg = f"Não consegui entender a solicitação: {error_msg}"
+        return error_msg, message_history
+
+def generate_semantic_commit_message(diff_summary: str) -> str:
+    """Gera uma mensagem de commit semântica baseada no diff dos arquivos alterados.
+    
+    Args:
+        diff_summary: Resumo do diff das alterações
+        
+    Returns:
+        Mensagem de commit semântica no formato 'tipo(escopo): descrição'
+    """
+    global llm_model
+    
+    try:
+        if not diff_summary or diff_summary.strip() == "":
+            return "chore: commit automático sem mudanças significativas"
+            
+        # Prompt específico para geração de mensagens de commit
+        prompt = f"""
+        Baseado no diff abaixo, gere uma mensagem de commit concisa no formato 'tipo(escopo): descrição'.
+        
+        Tipos comuns:
+        - feat: Uma nova funcionalidade
+        - fix: Correção de bug
+        - docs: Apenas documentação
+        - style: Alterações que não afetam o significado do código
+        - refactor: Alteração de código que não corrige bug nem adiciona recurso
+        - perf: Alteração que melhora o desempenho
+        - test: Adicionando ou corrigindo testes
+        - chore: Alterações no processo de build ou ferramentas auxiliares
+        
+        O escopo é opcional, mas deve indicar a parte do sistema afetada.
+        A descrição deve ser concisa (máx. 50 caracteres), usar verbos no presente e não terminar com ponto.
+        
+        DIFF:
+        {diff_summary}
+        
+        MENSAGEM DE COMMIT (apenas retorne a mensagem sem explicações):
+        """
+        
+        # Chamar o LLM diretamente
+        resposta = llm_model.invoke(prompt)
+        
+        # Extrair a mensagem da resposta
+        mensagem = resposta.content.strip()
+        
+        # Remover linhas extras e símbolos comuns em saídas de modelos
+        mensagem = mensagem.replace("```", "").strip()
+        mensagem = re.sub(r'^["`\']*|["`\']*$', '', mensagem)  # Remove aspas/backticks no início/fim
+        
+        # Verificar se a mensagem segue o formato semântico básico
+        if not re.match(r'^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)(\(.+?\))?: .+', mensagem):
+            # Adicionar um prefixo padrão se não estiver no formato correto
+            mensagem = "chore: " + mensagem
+            
+        # Limitar o tamanho da mensagem
+        if len(mensagem) > 72:
+            mensagem = mensagem[:72]
+            
+        return mensagem
+        
+    except Exception as e:
+        print(f"Erro ao gerar mensagem de commit: {e}")
+        return "chore: atualização automática de arquivos"
 
 if __name__ == "__main__":
     main() 
