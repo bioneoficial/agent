@@ -79,12 +79,22 @@ def parse_llm_output(llm_output: str) -> dict:
     if thought_action_match:
         thought = thought_action_match.group(1).strip()
         action = thought_action_match.group(3).strip()
-        action_input_str = thought_action_match.group(4).strip()
+        action_input_raw = thought_action_match.group(4).strip()
         
-        # O input da ferramenta para Langchain ToolExecutor é uma string única ou um dict.
-        # Nossas ferramentas atuais esperam uma string.
-        # Se action_input_str for "", None, ou apenas espaços, passe uma string vazia para a ferramenta.
-        # A lógica da ferramenta (ex: git_push_command) deve lidar com input vazio se apropriado.
+        # Clean up action input - remove common phrases that aren't actual inputs
+        action_input_str = action_input_raw.split("\n")[0].strip()  # Only take first line
+        
+        # Handle special cases
+        if action_input_str.lower() in ["(empty string)", "empty string", "''", '""', "no input"]:
+            action_input_str = ""
+        elif action_input_str.startswith("'") and action_input_str.endswith("'"):
+            # Remove single quotes if they're wrapping the entire string
+            action_input_str = action_input_str[1:-1].strip()
+        
+        # The input of the tool for Langchain ToolExecutor is a single string or dict.
+        # Our current tools expect a string.
+        # If action_input_str is "", None, or just spaces, pass an empty string to the tool.
+        # The tool logic (e.g., git_push_command) must handle empty input if appropriate.
         tool_input_for_invocation = action_input_str if action_input_str.strip() else ""
 
         return {
@@ -203,7 +213,14 @@ def git_push_command(branch_name: str = None) -> str:
     # Handles: "main", " feature/abc " --> "git push origin <branch>"
     if branch_name is None or not branch_name.strip() or branch_name == "''":
         # Attempt a simple git push
-        return execute_direct_command(["git", "push"])
+        result = execute_direct_command(["git", "push"])
+        # Check if error message contains "no upstream branch" indicating need to set upstream
+        if "no upstream branch" in result:
+            # Get current branch name
+            current_branch = execute_direct_command(["git", "rev-parse", "--abbrev-ref", "HEAD"]).strip()
+            # Execute git push with --set-upstream
+            return execute_direct_command(["git", "push", "--set-upstream", "origin", current_branch])
+        return result
     else:
         # A specific branch name is provided
         sanitized_branch_name = branch_name.strip()
