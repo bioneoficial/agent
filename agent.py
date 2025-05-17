@@ -67,14 +67,14 @@ def git_add_commit_command(commit_message: str) -> str:
 
 
 def main():
-    print("Loading Ollama LLM (phi3:mini) as ChatModel...")
+    print("Loading Ollama LLM (llama3:8b) as ChatModel...")
     try:
-        llm = ChatOllama(model="phi3:mini")
+        llm = ChatOllama(model="llama3:8b")
         llm.invoke("Hello, are you working?")
         print("Ollama ChatModel loaded successfully.")
     except Exception as e:
         print(f"Error loading Ollama ChatModel: {e}")
-        print("Please ensure the Ollama application is running and the model 'phi3:mini' is available.")
+        print("Please ensure the Ollama application is running and the model 'llama3:8b' is available.")
         return
 
     tools = [
