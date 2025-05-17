@@ -208,7 +208,7 @@ def main():
                 "   If no specialized tool fits, and the task is a general terminal command, use the 'Terminal' tool. "
                 "3. Action Input: On the very next line, write the input required by the chosen tool. "
                 "   - If the tool takes no input (like GitStatus), write an empty string: '' or 'no input'. "
-                "   - For the 'Terminal' tool, the Action Input MUST be a valid shell command string. For creating files with content, use the format: echo \"your content here\" > filename.txt "
+                "   - For the 'Terminal' tool: the Action Input MUST be *exclusively* the exact shell command string required for the task (e.g., 'ls -la', 'rm my_file.txt', 'echo \"text\" > new.txt'). ABSOLUTELY NO other text, such as your own explanations, reasoning, or conversational remarks, should be included in the Action Input for the Terminal tool. "
                 "   - For tools like GitCreateBranch, GitAddCommit, or GitPush (when a branch is specified), the Action Input MUST be *only* the value itself (e.g., 'feature/new-thing' or 'Initial commit'). Do NOT add any extra words, newlines, or conversational text. "
                 "   - If GitPush is used for a simple push (current branch to its upstream without specifying a branch name explicitly), the Action Input line should be empty after 'Action Input:' (i.e., just a newline character), which will pass an empty string or None to the tool. "
                 "4. OBSERVE: After the tool executes, you will receive an Observation. "
@@ -216,7 +216,11 @@ def main():
                 "   Thought: I have the answer or the action is complete. "
                 "   Final Answer: [Provide the direct answer or confirmation here]. "
                 "   Do not take further unnecessary actions. "
-                "6. If the Observation indicates an error OR if more steps are truly needed (e.g., a command requires an argument you don't have yet), then your Thought should explain this. If you need more information from the user, your Final Answer should be a question to the user asking for that specific piece of information. Then stop and wait for user's response. Do not try to invent information. When asking the user for information, your response MUST consist ONLY of a Thought and then a Final Answer containing the question. DO NOT attempt to use any Tool or Action in this specific response turn. "
+                "6. If the Observation indicates an error OR if more steps are truly needed (e.g., a command requires an argument you don't have yet), then your Thought should explain this. "
+                "   If your plan is to ask the user for more information: "
+                "     a. Your response for this turn MUST be ONLY a Thought explaining why you need to ask, followed by a Final Answer containing ONLY the direct question to the user. "
+                "     b. CRITICALLY: You MUST NOT use any 'Action:' or any tool in this turn. Your ONLY output is the Thought and the Final Answer (the question). Any other tool use at this stage is a failure to follow instructions. "
+                "   Then stop and wait for the user's response. Do not try to invent information. "
                 "7. CONTEXT HANDLING: If your previous 'Final Answer' was a question to the user, and the new user input appears to be the answer to that question, you MUST use this new information to attempt to complete the ORIGINAL task or goal. Do not treat the user's answer as a new, unrelated command unless it's clearly a change of topic. Re-evaluate the original goal with this new information. "
                 "Example - User asks to push, but doesn't specify branch: "
                 "Thought: The user wants to push commits. A simple 'git push' might work, or I might need to specify 'origin <branch>'. I will try a simple push first by providing an empty Action Input to GitPush. "
@@ -239,8 +243,8 @@ def main():
         initial_command = " ".join(sys.argv[1:])
         print(f"Executing initial command: {initial_command}")
         try:
-            response = agent.run(initial_command)
-            print(f"\nAssistant:\n{response}")
+            response_dict = agent.invoke({"input": initial_command})
+            print(f"\nAssistant:\n{response_dict.get('output')}")
         except Exception as e:
             print(f"Agent execution failed: {e}")
     else:
@@ -253,8 +257,8 @@ def main():
                     print("Exiting assistant...")
                     break
                 if user_input:
-                    response = agent.run(user_input)
-                    print(f"\nAssistant:\n{response}")
+                    response_dict = agent.invoke({"input": user_input})
+                    print(f"\nAssistant:\n{response_dict.get('output')}")
             except KeyboardInterrupt:
                 print("\nExiting assistant due to user interrupt...")
                 break
