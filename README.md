@@ -6,15 +6,21 @@ A modular AI agent system that provides Git and terminal assistance with a focus
 
 - **Terminal Assistant**: Run shell commands and get intelligent help
 - **Git Operations**: Manage git repositories with natural language commands
-- **File Operations**: Read, write, and view files in your repository
+- **File Operations**: Read, write, view, and delete files in your repository
+- **Multi-Mode Operation**: 
+  - `agent`: Execute commands and perform actions
+  - `ask`: Conversation mode without command execution
+  - `free`: Direct LLM interaction without tools
+- **Command Suggestions**: Capture and execute suggested commands and code blocks
+- **Direct Command Handling**: Fast responses for common Git and terminal operations
+- **LLM Fallback**: Complex requests handled by the LLM agent
 - **Safety Rails**: Prevents potentially dangerous commands from being executed
   - Incluindo explicações detalhadas sobre operações importantes
 - **Commit Message Generator**: Automatically generate semantic commit messages
-- **Specialized Git Commands**: Tools for common Git workflows
-  - `commit_deleted`: Stage and commit only deleted files with semantic messages
-  - `commit_modified`: Stage and commit only modified files with semantic messages
-- **File Tree Visualizer**: Get a clear view of your repository structure
-- **LangGraph Support**: Automatic retry and self-correction capabilities
+- **Enhanced Git Commands**: Improved handling of common Git workflows
+  - Auto-add and commit changes
+  - Auto-unstage changes
+  - Commit with descriptive messages
 
 ## Installation
 
@@ -43,44 +49,93 @@ Run the assistant in interactive mode:
 python main.py -i
 ```
 
-Run with LangGraph retry capabilities:
+Run with direct command handling disabled:
 
 ```bash
-python main.py -i -l
+python main.py -i -n
+```
+
+Run in a specific mode:
+
+```bash
+python main.py -i -m ask  # Conversation mode
+python main.py -i -m free  # Free LLM mode
 ```
 
 Run specific commands:
 
 ```bash
-python main.py "generate a commit message for my changes"
-python main.py "what files were modified in the last commit"
+python main.py "commit my changes"
+python main.py "git status"
 ```
+
+## Operational Modes
+
+### Agent Mode (default)
+Executes commands and performs actions directly on your system. Handles common Git and file operations with pattern matching and falls back to LLM for complex requests.
+
+### Ask Mode
+Conversation mode that provides answers without executing commands. Captures command suggestions that can be executed later in agent mode.
+
+### Free Mode
+Direct interaction with the LLM without tools or constraints. Useful for brainstorming, explanations, and code generation.
 
 ## Special Commands
 
-### Commit Specific File Types
+### Command & Code Suggestions
 
-Para commitar apenas tipos específicos de arquivos:
+When in ask or free mode, the assistant will capture suggested commands and code:
 
-```bash
-# Commit apenas os arquivos deletados
-> commit deleted files
-> use commit_deleted tool
-
-# Commit apenas os arquivos modificados
-> commit modified files
-> use commit_modified tool
+```
+💡 Command suggestion captured: `git restore --staged .`. Type 'execute suggestion' in agent mode to run.
 ```
 
-Cada comando:
-1. Identifica os arquivos do tipo especificado
-2. Adiciona apenas esses arquivos ao staging
-3. Gera uma mensagem de commit semântica com base nos arquivos afetados
-4. Comita com a mensagem gerada
+or 
+
+```
+💡 Code suggestion captured: Save as 'example.py'. Type 'execute suggestion' in agent mode to create this file.
+```
+
+Switch to agent mode and type `execute suggestion` to run the captured command or create the suggested file.
+
+### Git Operations
+
+Natural language handling for common Git operations:
+
+```
+# Add changes to staging
+> adicione as mudanças ao git
+> add modified files to git
+
+# Unstage changes
+> unstage changes
+> tire os arquivos de staged
+
+# Commit with auto-generated message
+> commit com mensagem descritiva
+> commit staged changes with analysis
+```
+
+### File Operations
+
+Create, edit, and remove files with natural language:
+
+```
+# Create files with code
+> criar um arquivo python para ordenar uma lista
+
+# Show file contents
+> cat main.py
+> mostrar o conteúdo do arquivo tools.py
+
+# Remove files
+> remover arquivos com extensão .log
+> delete files containing temp
+```
 
 ## Melhorias de Segurança
 
-O assistente agora inclui:
+O assistente inclui:
 
 - Explicações detalhadas sobre o que cada operação importante vai fazer antes de executar
 - Detecção de comandos potencialmente perigosos com solicitação de confirmação
@@ -89,10 +144,10 @@ O assistente agora inclui:
 
 ## Code Structure
 
-- **main.py**: Entry point with CLI and interactive mode
+- **main.py**: Entry point with CLI, interactive mode, and direct command handling
+- **agent_core.py**: LangChain agent with memory and conversation management
 - **tools.py**: All tools (Terminal, Git, File operations)
 - **llm_backend.py**: LLM initialization and error handling  
-- **agent_core.py**: LangChain agent with memory and conversation management
 - **commit_generator.py**: Standalone commit message generator
 - **tests/**: Unit tests for components
 
