@@ -141,6 +141,23 @@ def generate_and_create_file(prompt: str):
     return f"Arquivo {filename} criado com sucesso.\n{result}"
 
 def run_once(agent, prompt: str, no_direct: bool, typo_depth: int = 0):
+    # Handle "execute suggestion"
+    if prompt.strip().lower() == "execute suggestion":
+        suggestion = session.get('last_llm_suggestion')
+        if suggestion:
+            print(f"Executando sugestão capturada: {suggestion['type']}")
+            action_result = ""
+            if suggestion['type'] == 'command':
+                action_result = run_terminal(suggestion['content'])
+            elif suggestion['type'] == 'code':
+                action_result = create_file(f"{suggestion['filename']}|{suggestion['content']}")
+            
+            print(action_result)
+            session['last_llm_suggestion'] = None # Clear suggestion after execution
+            return action_result # Or some status message
+        else:
+            return "Nenhuma sugestão capturada para executar."
+
     # Process file creation requests with more general pattern
     file_creation_pattern = r'(?:cri[ea]r?|crie|create).*?(?:arquivo|file).*?(?:\.[a-z0-9]{1,4}\b|javascript|typescript|python|java|c\+\+|c#|c\b|go\b|ruby|php|swift|kotlin|rust|bash|shell)'
     if re.search(file_creation_pattern, prompt.lower(), re.IGNORECASE):
@@ -413,13 +430,97 @@ def explain(user_input: str) -> str:
             return f"Esta ação irá commitar {len(staged)} arquivo(s) staged."
         return "Nenhum arquivo staged para commit."
 
+def parse_and_store_suggestion(response_text: str, session: dict):
+    session['last_llm_suggestion'] = None # Clear previous
+    
+    # Regex for markdown code blocks (gets lang and content)
+    # Prioritize code blocks as they are more structured
+    code_block_match = re.search(r"```(?:([a-zA-Z0-9_\-\+#]+)\n)?([\s\S]+?)```", response_text)
+    
+    if code_block_match:
+        lang = code_block_match.group(1)
+        code_content = code_block_match.group(2).strip()
+        
+        # Basic language to extension mapping
+        ext_map = {
+            'python': 'py', 'py':'py', 'python3':'py',
+            'javascript': 'js', 'js': 'js',
+            'typescript': 'ts', 'ts': 'ts',
+            'java': 'java',
+            'csharp': 'cs', 'c#': 'cs',
+            'cpp': 'cpp', 'c++': 'cpp',
+            'c': 'c',
+            'html': 'html', 
+            'css': 'css', 
+            'shell': 'sh', 'bash': 'sh', 'zsh':'sh', 'sh':'sh',
+            'text': 'txt', 'markdown': 'md',
+            'json':'json', 'yaml':'yaml', 'yml':'yml', 'xml':'xml',
+            'powershell': 'ps1', 'ps1':'ps1'
+        }
+        extension = "txt" # Default extension
+        filename_base = f"suggested_code_{int(time.time())}"
+        if lang:
+            lang_lower = lang.lower()
+            extension = ext_map.get(lang_lower, "txt")
+            # Clean the code content further (remove language hint if it's the first line and matches lang)
+            if code_content.lower().startswith(lang_lower):
+                code_content = code_content[len(lang_lower):].lstrip()
+            # More specific filename if lang is known
+            filename = f"{filename_base}_{lang_lower}.{extension}"
+        else:
+            # Try to infer language from shebang for scripts
+            if code_content.startswith("#!/bin/bash") or code_content.startswith("#!/bin/sh") or code_content.startswith("#!/usr/bin/env bash") or code_content.startswith("#!/usr/bin/env sh"):
+                extension = "sh"
+                filename = f"{filename_base}_script.sh"
+            elif code_content.startswith("#!/usr/bin/env python") or code_content.startswith("#!/usr/bin/python"):
+                extension = "py"
+                filename = f"{filename_base}_script.py"
+            else:
+                filename = f"{filename_base}.{extension}" # default .txt
+        
+        session['last_llm_suggestion'] = {'type': 'code', 'content': code_content, 'filename': filename}
+        print(f"\n💡 Code suggestion captured: Save as '{filename}'. Type 'execute suggestion' in agent mode to create this file.")
+        return
+
+    # Regex for inline commands in backticks (if no code block was found)
+    # This regex tries to find simple, single-line commands.
+    # It looks for common command starts or simple structures.
+    # It avoids matching if it looks like part of a sentence (e.g. ends with punctuation)
+    potential_cmds = re.findall(r"`([^`\n]+?)`", response_text) # Find all potential commands
+    
+    if potential_cmds:
+        best_command = None
+        for cmd_text in potential_cmds:
+            cmd_text = cmd_text.strip()
+            # Heuristic to check if it's a plausible command:
+            # 1. Not too long (e.g., < 100 chars)
+            # 2. Contains typical command characters (alphanumeric, spaces, hyphens, slashes, dots)
+            # 3. Starts with a known command or has a structure (e.g. word space word)
+            # 4. Doesn't end with sentence-ending punctuation if it's short (might be a highlighted word)
+            if len(cmd_text) < 100 and re.match(r"^[a-zA-Z0-9_\s\.\-\/\\:]+$", cmd_text):
+                is_likely_command = False
+                common_command_starts = ["git", "ls", "cd", "mkdir", "rm", "python", "node", "cat", "echo", "touch", "mv", "cp", "sudo", "apt", "yum", "docker", "kubectl", "npm", "pip", "grep", "find", "aws", "gcloud", "az", "terraform", "ansible", "vagrant"]
+                if any(cmd_text.startswith(start) for start in common_command_starts) or ( ' ' in cmd_text and not cmd_text.endswith(('.', ',', '?', '!')) ) or (len(cmd_text.split()) == 1 and len(cmd_text) > 2 and not cmd_text.endswith(('.', ',', '?', '!'))):
+                    is_likely_command = True
+                
+                if is_likely_command:
+                    # If we find a good candidate, we take the first one for now.
+                    # More sophisticated logic could rank or choose the best if multiple are found.
+                    best_command = cmd_text
+                    break 
+        
+        if best_command:
+            session['last_llm_suggestion'] = {'type': 'command', 'content': best_command}
+            print(f"\n💡 Command suggestion captured: `{best_command}`. Type 'execute suggestion' in agent mode to run.")
+            return
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--interactive", "-i", action="store_true")
     parser.add_argument("--no-direct", "-n", action="store_true")
     parser.add_argument("--mode", "-m", choices=["agent", "ask", "free"], default="agent", 
                         help="Modes: agent (tools), ask (conversação sem execução) ou free (LLM livre sem ferramentas)")
-    parser.add_argument("query", nargs="*")
+    parser.add_argument("query", nargs="*" )
     args = parser.parse_args()
 
     interactive = args.interactive or not args.query
@@ -428,30 +529,34 @@ def main():
     shared_llm = get_llm()
     global SHARED_LLM
     SHARED_LLM = shared_llm
-    agent_mode = build_agent(agent_mode=True, shared_llm=shared_llm)
-    raw_llm = build_agent(agent_mode=False, shared_llm=shared_llm)  # retorna apenas o llm
+    agent_mode_instance = build_agent(agent_mode=True, shared_llm=shared_llm)
+    raw_llm_instance = build_agent(agent_mode=False, shared_llm=shared_llm)  # retorna apenas o llm
     print("Agents ready!")
+
+    global session # Make session global for access in run_once
+    session = {
+        "mode": args.mode,
+        "conversation_history": [],
+        "last_commands": [],
+        "last_llm_suggestion": None
+    }
 
     if not interactive:
         query = " ".join(args.query)
         if args.mode == "agent":
-            print(run_once(agent_mode, query, args.no_direct))
+            # Pass the agent instance, not the build_agent function
+            print(run_once(agent_mode_instance, query, args.no_direct))
         elif args.mode == "ask":
-            print(process_ask_mode(raw_llm, query))
+            print(process_ask_mode(raw_llm_instance, query, conversation=session['conversation_history']))
         else:  # free
-            response = raw_llm.invoke([SystemMessage(content="Você é um assistente e deve responder apenas texto."), HumanMessage(content=query)])
+            response = raw_llm_instance.invoke([SystemMessage(content="Você é um assistente e deve responder apenas texto."), HumanMessage(content=query)])
             print(response.content)
+            parse_and_store_suggestion(response.content, session)
         return
-
-    # Create session state for interactive mode
-    session = {
-        "mode": args.mode,
-        "conversation_history": [],
-        "last_commands": []
-    }
     
     print(f"=== Interactive Git-Terminal Assistant === [Mode: {session['mode'].upper()}]")
-    print("Tip: Type 'mode agent' to execute commands or 'mode ask' for conversation")
+    print("Tip: Type 'mode agent' to execute commands or 'mode ask' for conversation or 'mode free' for raw LLM interaction")
+    print("After ask/free mode, type 'execute suggestion' in agent mode to run/save captured suggestions.")
     
     while True:
         try:
@@ -474,60 +579,50 @@ def main():
                     
             # Process based on current mode
             if session["mode"] == "agent":
-                if "commit" in text.lower():
+                # Pass the agent instance
+                if "commit" in text.lower() and not text.strip().lower() == "execute suggestion": # Avoid double confirmation for execute suggestion if it involves commit
                     if input(f"⚠️ {explain(text)}\nContinuar? (s/N): ").lower() != "s":
                         print("Cancelado.")
                         continue
                         
-                result = run_once(agent_mode, text, args.no_direct)
+                result = run_once(agent_mode_instance, text, args.no_direct)
                 print(result)
                 
-                # Store last command for context
-                session["last_commands"].append({"command": text, "result": result})
-                if len(session["last_commands"]) > 5:  # Keep last 5 commands
-                    session["last_commands"] = session["last_commands"][-5:]
+                # Store last command for context (unless it was execute suggestion)
+                if text.strip().lower() != "execute suggestion":
+                    session["last_commands"].append({"command": text, "result": result})
+                    if len(session["last_commands"]) > 5:  # Keep last 5 commands
+                        session["last_commands"] = session["last_commands"][-5:]
                     
             elif session["mode"] == "ask":
                 # Add conversation context
                 context = ""
                 if session["conversation_history"] or session["last_commands"]:
                     context = "Based on our conversation and recent commands:\n"
-                    # Add last 3 conversation turns
                     if session["conversation_history"]:
                         for turn in session["conversation_history"][-3:]:
                             context += f"- You asked: {turn['question']}\n"
                             context += f"- I answered: {turn['answer'][:100]}...\n"
-                    # Add last 2 commands
                     if session["last_commands"]:
                         context += "Recent commands:\n"
                         for cmd in session["last_commands"][-2:]:
                             context += f"- {cmd['command']}\n"
                 
-                # Process conversational query
-                result = process_ask_mode(raw_llm, text, context, session["conversation_history"])
+                result = process_ask_mode(raw_llm_instance, text, context, session["conversation_history"])
                 print(result)
+                parse_and_store_suggestion(result, session) # Parse and store suggestion
                 
-                # Store in conversation history
                 session["conversation_history"].append({"question": text, "answer": result})
-                if len(session["conversation_history"]) > 10:  # Keep last 10 exchanges
+                if len(session["conversation_history"]) > 10:
                     session["conversation_history"] = session["conversation_history"][-10:]
                 
-                # Auto-switch detection
-                command_patterns = [r'^git\s+\w+', r'^ls\s+', r'^rm\s+', r'^cd\s+', r'^cat\s+']
-                if any(re.search(pattern, text.strip()) for pattern in command_patterns):
-                    if input("Este parece ser um comando. Mudar para modo Agent? (s/N): ").lower() == "s":
-                        session["mode"] = "agent"
-                        print("Mudando para AGENT mode e executando comando...")
-                        result = run_once(agent_mode, text, args.no_direct)
-                        print(result)
-                        session["last_commands"].append({"command": text, "result": result})
-                
             else:  # free mode
-                response = raw_llm.invoke([SystemMessage(content="Você é um assistente e deve responder apenas texto."), HumanMessage(content=text)])
+                response = raw_llm_instance.invoke([SystemMessage(content="Você é um assistente e deve responder apenas texto."), HumanMessage(content=text)])
                 print(response.content)
-                # store conversation simple history
+                parse_and_store_suggestion(response.content, session) # Parse and store suggestion
+                
                 session["conversation_history"].append({"question": text, "answer": response.content})
-                if len(session["conversation_history"]) > 10:
+                if len(session["conversation_history"]) > 10: 
                     session["conversation_history"] = session["conversation_history"][-10:]
                 
         except (KeyboardInterrupt, EOFError):
