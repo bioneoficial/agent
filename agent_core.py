@@ -1,230 +1,229 @@
-# agent_core.py
-from langchain.agents import initialize_agent, AgentType
-from langchain.memory import ConversationBufferMemory
+
+from __future__ import annotations
+
+import operator
+import uuid
+from typing import Any, Dict, List, TypedDict, Annotated
+
+from langchain.agents import AgentExecutor, create_structured_chat_agent
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langgraph.graph import StateGraph, END
+
 from tools import ALL_TOOLS
 from llm_backend import get_llm
-from typing import TypedDict, Annotated, Dict, List, Any
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from langchain_core.tools import BaseTool
-import operator
-from langgraph.graph import StateGraph, END
-from langchain_core.agents import AgentAction, AgentFinish
 
-def build_agent(verbose=True):
-    """Build a LangChain agent with memory and all tools."""
-    llm = get_llm()            # change model here if you want
-    
-    # Use ConversationBufferMemory for chat history
-    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-    
-    # Create the agent with standard LangChain components
-    agent = initialize_agent(
-        tools=ALL_TOOLS,
-        llm=llm,
-        agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-        memory=memory,
-        verbose=verbose,
-        max_iterations=6,
-        early_stopping_method="generate",  # Helps prevent loops
-        handle_parsing_errors=True         # Recover from parsing errors
+SYSTEM_MESSAGE = """
+Você é um assistente de Git e Terminal especializado, aqui para ajudar com
+comandos de terminal, operações git, gerenciamento de arquivos e navegação
+de repositórios.
+
+Quando lidar com comandos Git e Terminal:
+1. Entenda o objetivo do usuário antes de agir.
+2. Explique brevemente o que você planeja fazer.
+3. Execute os comandos necessários.
+4. Sempre use mensagens de commit semânticas.
+5. Priorize segurança em comandos potencialmente prejudiciais.
+
+Responda sempre em português brasileiro.
+"""
+
+FORMAT_INSTRUCTIONS = """
+Quando precisar usar uma ferramenta, responda **apenas** com JSON válido.
+
+Para chamar uma ferramenta:
+{{"tool": "<nome_da_ferramenta>", "tool_input": "<argumento_em_string>"}}
+
+Para encerrar e responder ao usuário:
+{{"answer": "<sua_resposta_final_ao_usuário>"}}
+"""
+
+
+class InMemoryHistory(BaseChatMessageHistory):
+    def __init__(self):
+        self.messages: List[BaseMessage] = []
+
+    def add_message(self, message: BaseMessage) -> None:
+        self.messages.append(message)
+
+    def clear(self) -> None:
+        self.messages = []
+
+
+def build_agent(verbose: bool = True):
+    llm = get_llm()
+
+    system_template = (
+        SYSTEM_MESSAGE
+        + "\n\n"
+        + FORMAT_INSTRUCTIONS
+        + "\n\n# Ferramentas disponíveis\n{tools}"
+        + "\n\n(Para usar, refira-se pelo nome presente em {tool_names}.)"
     )
-    
-    return agent
 
-# LangGraph implementation with retry capabilities
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_template),
+            MessagesPlaceholder("chat_history"),
+            ("user", "{input}"),
+            ("ai", "{agent_scratchpad}"),
+        ]
+    )
+
+    agent_chain = create_structured_chat_agent(llm, ALL_TOOLS, prompt)
+
+    agent_executor_core = AgentExecutor(
+        agent=agent_chain,
+        tools=ALL_TOOLS,
+        verbose=verbose,
+        return_intermediate_steps=True,
+        handle_parsing_errors=True,
+    )
+
+    store: Dict[str, InMemoryHistory] = {}
+
+    agent_with_history = RunnableWithMessageHistory(
+        agent_executor_core,
+        lambda sid: store.get(sid, InMemoryHistory()),
+        input_messages_key="input",
+        history_messages_key="chat_history",
+    )
+
+    def run(prompt: str):
+        session_id = str(uuid.uuid4())
+        store[session_id] = InMemoryHistory()
+        return agent_with_history.invoke(
+            {"input": prompt},
+            config={"configurable": {"session_id": session_id}},
+        )
+
+    run.invoke = lambda p: run(p)
+    return run
+
+
 class AgentState(TypedDict):
-    """State for the LangGraph agent."""
     messages: Annotated[List[BaseMessage], operator.add]
-    next_action: AgentAction | AgentFinish | None
+    next_action: Any | None
     last_observation: str | None
     iteration: int
     error: bool
     error_message: str | None
 
-def build_langgraph_agent(verbose=True, max_iterations=6):
-    """Build a LangGraph agent with retry capabilities."""
-    llm = get_llm()  # Get the LLM
-    
-    # Define the agent state handler
+
+def build_langgraph_agent(verbose: bool = True, max_iterations: int = 6):
+    llm = get_llm()
+
     def agent_node(state: AgentState) -> Dict[str, Any]:
-        """Process agent reasoning and determine the next action."""
-        # Prepare input messages
         messages = state["messages"]
-        
-        # Call the LLM to get the next action
         response = llm.invoke(messages)
-        
+        from langchain_core.agents import AgentAction, AgentFinish
         try:
-            # Parse the response to get AgentAction or AgentFinish
             action = llm.parse_ai_message(response)
-            
-            # Return updated state
             return {
                 "next_action": action,
                 "messages": messages + [response],
                 "error": False,
-                "error_message": None
+                "error_message": None,
             }
         except Exception as e:
-            # Handle parsing error
             return {
                 "messages": messages + [response],
                 "error": True,
-                "error_message": str(e)
+                "error_message": str(e),
             }
-    
-    # Define tool execution node
+
     def tool_node(state: AgentState) -> Dict[str, Any]:
-        """Execute the tool specified by the agent."""
+        from langchain_core.agents import AgentFinish
         next_action = state["next_action"]
-        
-        # If no action or if it's a finish action, return state unchanged
         if next_action is None or isinstance(next_action, AgentFinish):
             return state
-        
-        # Get the right tool
-        tool_name = next_action.tool
-        tool_input = next_action.tool_input
-        
-        # Find the matching tool
-        matching_tools = [tool for tool in ALL_TOOLS if tool.name == tool_name]
-        if not matching_tools:
-            observation = f"Tool {tool_name} not found."
+
+        tool = next((t for t in ALL_TOOLS if t.name == next_action.tool), None)
+        if tool is None:
+            obs = f"Tool {next_action.tool} not found."
             return {
-                "last_observation": observation, 
-                "messages": state["messages"] + [
-                    AIMessage(content=f"Error: {observation}")
-                ],
+                "last_observation": obs,
+                "messages": state["messages"] + [AIMessage(content=f"Erro: {obs}")],
+                "iteration": state["iteration"] + 1,
                 "error": True,
-                "error_message": observation
+                "error_message": obs,
             }
-        
-        # Execute the tool
-        tool = matching_tools[0]
+
         try:
-            observation = tool.func(tool_input) if tool_input else tool.func()
+            observation = (
+                tool.func(next_action.tool_input)
+                if next_action.tool_input is not None
+                else tool.func()
+            )
             return {
                 "last_observation": observation,
-                "messages": state["messages"] + [
-                    AIMessage(content=f"Observation: {observation}")
-                ],
+                "messages": state["messages"]
+                + [AIMessage(content=f"Observação: {observation}")],
                 "iteration": state["iteration"] + 1,
                 "error": False,
-                "error_message": None
+                "error_message": None,
             }
         except Exception as e:
-            observation = f"Error executing {tool_name}: {str(e)}"
+            obs = f"Erro executando {tool.name}: {e}"
             return {
-                "last_observation": observation,
-                "messages": state["messages"] + [
-                    AIMessage(content=f"Error: {observation}")
-                ],
+                "last_observation": obs,
+                "messages": state["messages"] + [AIMessage(content=f"Erro: {obs}")],
                 "iteration": state["iteration"] + 1,
                 "error": True,
-                "error_message": str(e)
+                "error_message": str(e),
             }
-    
-    # Decision node for handling errors and retries
+
     def error_handler_node(state: AgentState) -> Dict[str, Any]:
-        """Handle errors by adding a system message suggesting a fix."""
         return {
-            "messages": state["messages"] + [
-                AIMessage(content=f"There was an error: {state['error_message']}. Please try a different approach.")
-            ],
-            "next_action": None,  # Clear the next action so agent recalculates
+            "messages": state["messages"]
+            + [AIMessage(content=f"Houve um erro: {state['error_message']}. Tente outra abordagem.")],
+            "next_action": None,
         }
-    
-    # Function to decide whether to continue, handle error, or finish
+
     def router(state: AgentState) -> str:
-        """Decide the next node in the graph based on current state."""
-        # Check if we reached the max iterations
+        from langchain_core.agents import AgentFinish
         if state["iteration"] >= max_iterations:
             return "finish"
-            
-        # Check if there was an error
-        if state["error"] and state["error_message"]:
+        if state["error"]:
             return "error_handler"
-            
-        # Check if we should finish
         if isinstance(state["next_action"], AgentFinish):
             return "finish"
-            
-        # Continue with the agent-tool loop
         return "agent"
-    
-    # Function to create the final response
-    def final_response_node(state: AgentState) -> Dict[str, Any]:
-        """Create the final response based on the agent state."""
-        next_action = state["next_action"]
-        messages = state["messages"]
-        
-        if isinstance(next_action, AgentFinish):
-            # Agent completed successfully
-            return {
-                "messages": messages + [
-                    AIMessage(content=next_action.return_values["output"])
-                ]
-            }
-        elif state["iteration"] >= max_iterations:
-            # Ran out of iterations
-            return {
-                "messages": messages + [
-                    AIMessage(content="I apologize, but I've reached the maximum number of steps. Here's what I know so far: " + 
-                              (state["last_observation"] or "No final observation available."))
-                ]
-            }
-        else:
-            # Some error occurred
-            return {
-                "messages": messages + [
-                    AIMessage(content="I wasn't able to complete the task due to errors. Here's what happened: " + 
-                              (state["error_message"] or "Unknown error"))
-                ]
-            }
-    
-    # Create the graph
+
+    def final_node(state: AgentState) -> Dict[str, Any]:
+        return {"messages": state["messages"]}
+
     workflow = StateGraph(AgentState)
-    
-    # Add nodes
     workflow.add_node("agent", agent_node)
     workflow.add_node("tool", tool_node)
     workflow.add_node("error_handler", error_handler_node)
-    workflow.add_node("finish", final_response_node)
-    
-    # Add edges
+    workflow.add_node("finish", final_node)
     workflow.add_edge("agent", "tool")
     workflow.add_edge("tool", router)
     workflow.add_edge("error_handler", "agent")
     workflow.add_edge("finish", END)
-    
-    # Compile the graph
-    app = workflow.compile()
-    
-    return app
 
-def run_langgraph_agent(app, query: str, messages: List[BaseMessage] = None):
-    """Run the LangGraph agent with a query."""
+    return workflow.compile()
+
+
+def run_langgraph_agent(app, query: str, messages: List[BaseMessage] | None = None):
     if messages is None:
-        messages = []
-    
-    # Add the user query
-    messages.append(HumanMessage(content=query))
-    
-    # Initial state
-    initial_state = {
-        "messages": messages,
-        "next_action": None,
-        "last_observation": None,
-        "iteration": 0,
-        "error": False,
-        "error_message": None
-    }
-    
-    # Stream results from the agent
-    result = app.invoke(initial_state)
-    
-    # Extract just the final answer (the content of the last message)
-    if result["messages"] and isinstance(result["messages"][-1], AIMessage):
-        return result["messages"][-1].content
+        messages = [HumanMessage(content=query)]
     else:
-        return "No response generated." 
+        messages.append(HumanMessage(content=query))
+
+    result = app.invoke(
+        {
+            "messages": messages,
+            "next_action": None,
+            "last_observation": None,
+            "iteration": 0,
+            "error": False,
+            "error_message": None,
+        }
+    )
+
+    ai_msgs = [m for m in result["messages"] if isinstance(m, AIMessage)]
+    return ai_msgs[-1].content if ai_msgs else "Sem resposta gerada."
