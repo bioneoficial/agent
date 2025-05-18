@@ -3,7 +3,8 @@ import argparse
 import shlex
 import re
 import glob
-from new_agent import build_agent
+from agent_core import build_agent, process_ask_mode
+from llm_backend import get_llm
 from tools import run_terminal, git_status as git, commit_staged, edit_file, remove_file, create_file
 
 COMMON_TERMINAL_COMMANDS = [
@@ -273,10 +274,10 @@ def run_once(agent, prompt: str, no_direct: bool):
     
     for pattern, replacement in typo_patterns:
         if re.search(pattern, prompt_lower):
-            # Tentamos corrigir o erro e reprocessar
             corrected = re.sub(pattern, replacement, prompt_lower)
+            if corrected == prompt_lower:
+                break  # evita recursão infinita
             print(f"Corrigindo comando: {corrected}")
-            # Tenta executar a versão corrigida
             return run_once(agent, corrected, no_direct)
     
     try:
@@ -340,38 +341,108 @@ def explain(user_input: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--interactive","-i",action="store_true")
-    parser.add_argument("--no-direct","-n",action="store_true")
+    parser.add_argument("--interactive", "-i", action="store_true")
+    parser.add_argument("--no-direct", "-n", action="store_true")
+    parser.add_argument("--mode", "-m", choices=["agent", "ask"], default="agent", 
+                        help="Starting mode: 'agent' for command execution or 'ask' for conversation")
     parser.add_argument("query", nargs="*")
     args = parser.parse_args()
 
     interactive = args.interactive or not args.query
 
-    print("Building agent...")
-    agent = build_agent()
-    print("LangChain agent ready!")
+    print("Building agents (shared model)...")
+    shared_llm = get_llm()
+    agent_mode = build_agent(agent_mode=True, shared_llm=shared_llm)
+    ask_mode_llm = build_agent(agent_mode=False, shared_llm=shared_llm)
+    print("Agents ready!")
 
     if not interactive:
         query = " ".join(args.query)
-        print(run_once(agent, query, args.no_direct))
+        if args.mode == "agent":
+            print(run_once(agent_mode, query, args.no_direct))
+        else:
+            print(process_ask_mode(ask_mode_llm, query))
         return
 
-    print("=== Interactive Git-Terminal Assistant ===")
+    # Create session state for interactive mode
+    session = {
+        "mode": args.mode,
+        "conversation_history": [],
+        "last_commands": []
+    }
+    
+    print(f"=== Interactive Git-Terminal Assistant === [Mode: {session['mode'].upper()}]")
+    print("Tip: Type 'mode agent' to execute commands or 'mode ask' for conversation")
+    
     while True:
         try:
-            text = input("\n> ")
-            if text.strip().lower() in {"exit","quit","q"}:
+            text = input(f"\n[{session['mode'].upper()}] > ")
+            if text.strip().lower() in {"exit", "quit", "q"}:
                 break
             if not text.strip():
                 continue
-
-            if "commit" in text.lower():
-                if input(f"⚠️ {explain(text)}\nContinuar? (s/N): ").lower() != "s":
-                    print("Cancelado.")
+                
+            # Handle mode switching
+            if text.lower().startswith("mode "):
+                new_mode = text.lower().split(" ")[1].strip()
+                if new_mode in ["agent", "ask"]:
+                    session["mode"] = new_mode
+                    print(f"Switched to {new_mode.upper()} mode")
                     continue
-
-            result = run_once(agent, text, args.no_direct)
-            print(result)
+                else:
+                    print(f"Unknown mode: {new_mode}. Available modes: agent, ask")
+                    continue
+                    
+            # Process based on current mode
+            if session["mode"] == "agent":
+                if "commit" in text.lower():
+                    if input(f"⚠️ {explain(text)}\nContinuar? (s/N): ").lower() != "s":
+                        print("Cancelado.")
+                        continue
+                        
+                result = run_once(agent_mode, text, args.no_direct)
+                print(result)
+                
+                # Store last command for context
+                session["last_commands"].append({"command": text, "result": result})
+                if len(session["last_commands"]) > 5:  # Keep last 5 commands
+                    session["last_commands"] = session["last_commands"][-5:]
+                    
+            else:  # Ask mode
+                # Add conversation context
+                context = ""
+                if session["conversation_history"] or session["last_commands"]:
+                    context = "Based on our conversation and recent commands:\n"
+                    # Add last 3 conversation turns
+                    if session["conversation_history"]:
+                        for turn in session["conversation_history"][-3:]:
+                            context += f"- You asked: {turn['question']}\n"
+                            context += f"- I answered: {turn['answer'][:100]}...\n"
+                    # Add last 2 commands
+                    if session["last_commands"]:
+                        context += "Recent commands:\n"
+                        for cmd in session["last_commands"][-2:]:
+                            context += f"- {cmd['command']}\n"
+                
+                # Process conversational query
+                result = process_ask_mode(ask_mode_llm, text, context, session["conversation_history"])
+                print(result)
+                
+                # Store in conversation history
+                session["conversation_history"].append({"question": text, "answer": result})
+                if len(session["conversation_history"]) > 10:  # Keep last 10 exchanges
+                    session["conversation_history"] = session["conversation_history"][-10:]
+                
+                # Auto-switch detection
+                command_patterns = [r'^git\s+\w+', r'^ls\s+', r'^rm\s+', r'^cd\s+', r'^cat\s+']
+                if any(re.search(pattern, text.strip()) for pattern in command_patterns):
+                    if input("Este parece ser um comando. Mudar para modo Agent? (s/N): ").lower() == "s":
+                        session["mode"] = "agent"
+                        print("Mudando para AGENT mode e executando comando...")
+                        result = run_once(agent_mode, text, args.no_direct)
+                        print(result)
+                        session["last_commands"].append({"command": text, "result": result})
+                
         except (KeyboardInterrupt, EOFError):
             break
 
