@@ -2,6 +2,7 @@ import os, subprocess, shlex, re
 from pathlib import Path
 from pydantic import BaseModel
 from langchain.agents import Tool
+from commit_generator import generate_commit_message
 
 def _safe_run(cmd: list[str]) -> str:
     if re.search(r"rm\s+-[rf].*\/", " ".join(cmd)):
@@ -49,6 +50,23 @@ def remove_file(filepath: str) -> str:
     except Exception as e:
         return f"Erro ao remover arquivo: {str(e)}"
 
+def commit_auto(stage_all: bool = False) -> str:
+    """Stage files (optionally all) and commit with an auto-generated descriptive message."""
+    try:
+        if stage_all:
+            _safe_run(["git", "add", "-A"])
+        # Ensure there is something staged
+        staged_files = git_status("diff --cached --name-only")
+        if not staged_files:
+            return "Nenhum arquivo staged para commit."
+        # Build diff summary for staged changes only
+        diff_summary = _safe_run(["git", "diff", "--cached", "--stat"])
+        message = generate_commit_message(diff_summary)
+        # Perform commit
+        return _safe_run(["git", "commit", "-m", message])
+    except Exception as e:
+        return f"Erro ao commitar: {str(e)}"
+
 class _NoArgs(BaseModel): pass
 
 TerminalTool     = Tool("terminal",       run_terminal,  "Executa comando de shell")
@@ -66,6 +84,8 @@ EditFileTool = Tool("edit_file", edit_file,
                     "Edita arquivo existente; formato: 'arquivo.txt|novo conteúdo'")
 RemoveFileTool = Tool("remove_file", remove_file,
                       "Remove um arquivo; arg: path do arquivo")
+CommitAutoTool = Tool("commit_auto", lambda stage_all=False: commit_auto(stage_all),
+                       description="Adiciona (opcionalmente) todas as mudanças e commita com mensagem gerada automaticamente")
 
 ALL_TOOLS = [TerminalTool, GitStatusTool, CommitStagedTool, FileRead, FileWrite, 
-             CreateFileTool, EditFileTool, RemoveFileTool]
+             CreateFileTool, EditFileTool, RemoveFileTool, CommitAutoTool]

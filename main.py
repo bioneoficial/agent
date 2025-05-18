@@ -5,7 +5,7 @@ import re
 import glob
 from agent_core import build_agent, process_ask_mode
 from llm_backend import get_llm
-from tools import run_terminal, git_status as git, commit_staged, edit_file, remove_file, create_file
+from tools import run_terminal, git_status as git, commit_staged, edit_file, remove_file, create_file, commit_auto
 
 COMMON_TERMINAL_COMMANDS = [
     "ls","ll","la","pwd","cd","find","locate","tree","whoami","who","w","id",
@@ -78,6 +78,17 @@ def run_once(agent, prompt: str, no_direct: bool):
     # Tratamento direto para comandos comuns
     prompt_lower = prompt.lower()
     
+    # Detect combined request to add changes and commit WITH descriptive message before other handlers
+    if any(w in prompt_lower for w in ["adicion", "adicione", "add"]) and any(w in prompt_lower for w in ["commit", "commite", "commitar", "comite"]):
+        descriptive_req = any(w in prompt_lower for w in ["descrit", "contexto", "diff", "analise", "análise"])
+        if descriptive_req:
+            print("Fluxo rápido: adicionando e commitando com mensagem descritiva gerada automaticamente")
+            return commit_auto(stage_all=True)
+        else:
+            print("Fluxo rápido: adicionando todas as mudanças e commitando com mensagem padrão")
+            git("add -A")
+            return commit_staged()
+
     # Comando git
     if "git " in prompt_lower or ("adicione" in prompt_lower and "git" in prompt_lower) or "staged" in prompt_lower or "stage" in prompt_lower:
         # Tratamento especial para git restore (unstage)
@@ -221,48 +232,40 @@ def run_once(agent, prompt: str, no_direct: bool):
     commit_words = ["commit", "commitar", "comitar", "comite", "commite"]
     
     if any(word in prompt.lower() for word in commit_words):
-        all_patterns = ["all", "todos", "tudo", "todas", "tds", "everything"]
-        commit_all = any(pattern in prompt.lower() for pattern in all_patterns)
-        
-        if commit_all:
-            # Extrai a mensagem de commit, se houver
-            message = ""
-            for pattern in ["message", "mensagem", "with", "com"]:
-                if pattern in prompt.lower():
-                    parts = prompt.lower().split(pattern, 1)
-                    if len(parts) > 1:
-                        message = parts[1].strip()
-                        break
-            
-            if not message or len(message) < 5:
-                # Se não houver mensagem específica, usa uma mensagem genérica
-                message = "chore: auto commit with all changes"
-            
-            print(f"Executando commit de todas as alterações com mensagem: {message}")
-            git("add -A")  # Stage all changes
-            return git(f'commit -m "{message}"')
-            
-        elif "staged" in prompt.lower() or "stage" in prompt.lower():
-            # Apenas commita os arquivos que já estão staged
-            print("Executando commit_staged diretamente")
+        # Check if user also asked to add/stage changes in same request
+        add_requested = any(word in prompt_lower for word in ["add", "adicion", "adicione", "adicionar"])
+        descriptive_requested = any(word in prompt_lower for word in ["descritiva", "descrev", "contexto", "diff", "analise", "análise"])
+
+        if add_requested and descriptive_requested:
+            print("Adicionando todas as mudanças e commiting com mensagem gerada automaticamente (descritiva)")
+            return commit_auto(stage_all=True)
+        elif add_requested:
+            print("Adicionando todas as mudanças e commiting com mensagem padrão")
+            git("add -A")
             return commit_staged()
-        else:
-            # Tenta determinar o que o usuário quer com base no texto
-            if "descri" in prompt.lower() or "mensagem" in prompt.lower() or "message" in prompt.lower():
-                # Provavelmente quer commitar todos com mensagem
-                message = prompt.split("message", 1)[-1].strip() if "message" in prompt.lower() else ""
-                if not message or len(message) < 5:
-                    message = prompt.split("mensagem", 1)[-1].strip() if "mensagem" in prompt.lower() else ""
-                if not message or len(message) < 5:
-                    message = "chore: auto commit based on user request"
-                
-                print(f"Executando commit com mensagem: {message}")
-                git("add -A")  # Stage all changes
-                return git(f'commit -m "{message}"')
-            else:
-                # Default: apenas commita os arquivos staged
-                print("Executando commit_staged diretamente")
-                return commit_staged()
+        elif descriptive_requested:
+            print("Commitando arquivos staged com mensagem gerada automaticamente (descritiva)")
+            return commit_auto(stage_all=False)
+        elif "staged" in prompt_lower:
+            print("Executando commit_staged apenas em arquivos já staged")
+            return commit_staged()
+
+        # Extrai a mensagem de commit, se houver
+        message = ""
+        for pattern in ["message", "mensagem", "with", "com"]:
+            if pattern in prompt.lower():
+                parts = prompt.lower().split(pattern, 1)
+                if len(parts) > 1:
+                    message = parts[1].strip()
+                    break
+        
+        if not message or len(message) < 5:
+            # Se não houver mensagem específica, usa uma mensagem genérica
+            message = "chore: auto commit with all changes"
+        
+        print(f"Executando commit de todas as alterações com mensagem: {message}")
+        git("add -A")  # Stage all changes
+        return git(f'commit -m "{message}"')
     
     # Tratamento para comandos com erros de digitação comuns
     typo_patterns = [
