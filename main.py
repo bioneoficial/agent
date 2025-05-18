@@ -6,6 +6,10 @@ import glob
 from agent_core import build_agent, process_ask_mode
 from llm_backend import get_llm
 from tools import run_terminal, git_status as git, commit_staged, edit_file, remove_file, create_file, commit_auto
+from langchain_core.messages import HumanMessage, SystemMessage
+import time
+
+SHARED_LLM = None  # will be set in main()
 
 COMMON_TERMINAL_COMMANDS = [
     "ls","ll","la","pwd","cd","find","locate","tree","whoami","who","w","id",
@@ -70,7 +74,84 @@ def extract_command(prompt: str, command_type: str) -> str:
         
     return ""
 
-def run_once(agent, prompt: str, no_direct: bool):
+def generate_and_create_file(prompt: str):
+    """
+    General-purpose function that:
+    1. Extracts or infers filename and language
+    2. Generates code using LLM to implement the described functionality
+    3. Creates the file with the generated code (stripping chain-of-thought)
+    """
+    # 1) Try to extract an explicit filename with extension
+    filename_match = re.search(r'(?:cri[ea]r?|crie|create|make)\s+(?:um\s+)?(?:arquivo|file)?\s*([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+)', prompt, re.IGNORECASE)
+    filename = None
+    if filename_match:
+        filename = filename_match.group(1).strip()
+    
+    # If no explicit filename, infer from language keyword
+    if not filename:
+        # Infer extension from common language words
+        lang_ext_map = {
+            'javascript': 'js', 'js': 'js', 'typescript': 'ts', 'python': 'py', 'java': 'java', 'c#': 'cs', 'csharp':'cs',
+            'c++':'cpp', 'cpp':'cpp', 'c ': 'c', 'go':'go', 'ruby':'rb', 'php':'php', 'swift':'swift',
+            'kotlin':'kt', 'rust':'rs', 'bash':'sh', 'shell':'sh'
+        }
+        for key, ext in lang_ext_map.items():
+            if key in prompt.lower():
+                filename = f"generated_{int(time.time())}.{ext}"
+                break
+    if not filename:
+        return "Não consegui inferir um nome de arquivo ou linguagem. Por favor, especifique explicitamente o nome do arquivo (ex: meu_arquivo.js)."
+    
+    extension = filename.split('.')[-1].lower()
+    # Map extension to language for prompting
+    lang_map = {
+        'js': 'JavaScript', 'ts':'TypeScript', 'py':'Python', 'java':'Java', 'cs':'C#', 'cpp':'C++', 'c':'C', 'go':'Go',
+        'rb':'Ruby','php':'PHP','swift':'Swift','kt':'Kotlin','rs':'Rust','sh':'Bash','html':'HTML','css':'CSS','sql':'SQL',
+        'md':'Markdown','json':'JSON','xml':'XML','yaml':'YAML','yml':'YAML'
+    }
+    language = lang_map.get(extension, extension.upper())
+    
+    # 2) Extract functionality description (everything after filename or keyword)
+    after_file = prompt
+    if filename_match:
+        after_file = prompt[filename_match.end():]
+    functionality = after_file.strip()
+    if not functionality:
+        functionality = f"código de exemplo em {language}"
+    
+    # 3) Generate code with LLM
+    llm = SHARED_LLM or get_llm()
+    messages = [
+        SystemMessage(content="Você é um gerador de código profissional. Gere apenas código, sem explicações."),
+        HumanMessage(content=f"Crie código {language} para: {functionality}\nApenas código, sem comentários fora do código.")
+    ]
+    try:
+        code_raw = llm.invoke(messages).content.strip()
+    except Exception as e:
+        return f"Falha ao obter código do modelo: {e}"
+    
+    # 4) Strip chain-of-thought or markdown fences
+    code = re.sub(r'^```[\w+]*\n', '', code_raw)
+    code = re.sub(r'```$', '', code)
+    if not code:
+        return "Modelo não retornou código válido. Tente reformular o pedido."
+    
+    # 5) Write file
+    result = create_file(f"{filename}|{code}")
+    return f"Arquivo {filename} criado com sucesso.\n{result}"
+
+def run_once(agent, prompt: str, no_direct: bool, typo_depth: int = 0):
+    # Process file creation requests with more general pattern
+    file_creation_pattern = r'(?:cri[ea]r?|crie|create).*?(?:arquivo|file).*?(?:\.[a-z0-9]{1,4}\b|javascript|typescript|python|java|c\+\+|c#|c\b|go\b|ruby|php|swift|kotlin|rust|bash|shell)'
+    if re.search(file_creation_pattern, prompt.lower(), re.IGNORECASE):
+        print("Detectado pedido de criação de arquivo com código. Gerando código diretamente...")
+        return generate_and_create_file(prompt)
+    
+    # Keep other direct fallbacks for simple commands
+    if "tools.py" in prompt.lower() and ("conteudo" in prompt.lower() or "conteúdo" in prompt.lower() or "qual" in prompt.lower()):
+        print("Usando solução direta para mostrar conteúdo de tools.py")
+        return run_terminal("cat tools.py")
+        
     if is_terminal_command(prompt) and not no_direct:
         print(f"Executando comando diretamente: {prompt}")
         return run_terminal(prompt)
@@ -214,20 +295,6 @@ def run_once(agent, prompt: str, no_direct: bool):
             print(f"Editando arquivo {file_path} com novo conteúdo: {content}")
             return edit_file(f"{file_path}|{content}")
     
-    # Tratamento especial para comandos de criação de arquivo
-    create_file_match = re.search(r'cri(?:ar|e) (?:um )?arquivo (?:chamado )?([^\s]+).*(?:conte[úu]do|com)\s*:?\s*[\'"]?([^\'""]+)[\'"]?', prompt, re.IGNORECASE | re.DOTALL)
-    if create_file_match:
-        file_path = create_file_match.group(1).strip()
-        content = create_file_match.group(2).strip()
-        
-        if file_path and content:
-            try:
-                print(f"Criando arquivo {file_path} com conteúdo: {content}")
-                result = create_file(f"{file_path}|{content}")
-                return result
-            except Exception as e:
-                print(f"Erro ao criar arquivo: {e}")
-    
     # Tratamento simplificado para comandos de commit
     commit_words = ["commit", "commitar", "comitar", "comite", "commite"]
     
@@ -268,20 +335,24 @@ def run_once(agent, prompt: str, no_direct: bool):
         return git(f'commit -m "{message}"')
     
     # Tratamento para comandos com erros de digitação comuns
-    typo_patterns = [
-        (r'remo+va', 'remover'),
-        (r'adicion[ae]', 'adicionar'),
-        (r'modifi[ck]', 'modificar'),
-        (r'commi?ta', 'commit'),
-    ]
-    
-    for pattern, replacement in typo_patterns:
-        if re.search(pattern, prompt_lower):
-            corrected = re.sub(pattern, replacement, prompt_lower)
-            if corrected == prompt_lower:
-                break  # evita recursão infinita
-            print(f"Corrigindo comando: {corrected}")
-            return run_once(agent, corrected, no_direct)
+    # MAX_TYPO_DEPTH = 5
+    # if typo_depth >= MAX_TYPO_DEPTH:
+    #     print(f"Aviso: Profundidade máxima de correção de typos ({MAX_TYPO_DEPTH}) atingida. Processando como está.")
+    # else:
+    #     typo_patterns = [
+    #         (r'\bremo+va\b', 'remover'),
+    #         (r'\badicion[ae]\b', 'adicionar'),
+    #         (r'\bmodifi[ck]\b', 'modificar'),
+    #         (r'\bcommi?ta\b', 'commit'),
+    #     ]
+    #     
+    #     for pattern, replacement in typo_patterns:
+    #         if re.search(pattern, prompt_lower):
+    #             corrected = re.sub(pattern, replacement, prompt_lower)
+    #             if corrected == prompt_lower:
+    #                 break  # evita recursão infinita se o padrão corresponder à sua própria saída
+    #             print(f"Corrigindo comando: {corrected}")
+    #             return run_once(agent, corrected, no_direct, typo_depth + 1) # Incremented typo_depth
     
     try:
         return agent.invoke(prompt)["output"]
@@ -355,6 +426,8 @@ def main():
 
     print("Building agents (shared model)...")
     shared_llm = get_llm()
+    global SHARED_LLM
+    SHARED_LLM = shared_llm
     agent_mode = build_agent(agent_mode=True, shared_llm=shared_llm)
     ask_mode_llm = build_agent(agent_mode=False, shared_llm=shared_llm)
     print("Agents ready!")

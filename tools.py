@@ -79,7 +79,7 @@ FileWrite = Tool("write_file", lambda s: Path(s.split('|',1)[0]).expanduser()
                                           .write_text(s.split('|',1)[1]) or "ok",
                  "Cria ou sobrescreve arquivo; arg: path|conteúdo")
 CreateFileTool = Tool("create_file", create_file, 
-                     "Cria arquivo com conteúdo; formato: 'arquivo.txt|conteúdo do arquivo'")
+                     "Use para criar um novo arquivo. O input DEVE ser 'caminho/do/arquivo.txt|conteúdo textual do arquivo'. Se o prompt do usuário descrever o conteúdo (ex: 'crie um arquivo com uma função que faz X'), você DEVE PRIMEIRO GERAR O CONTEÚDO COMPLETO e então usar esta ferramenta com o nome do arquivo e o conteúdo gerado. Não use esta ferramenta sem conteúdo explícito.")
 EditFileTool = Tool("edit_file", edit_file,
                     "Edita arquivo existente; formato: 'arquivo.txt|novo conteúdo'")
 RemoveFileTool = Tool("remove_file", remove_file,
