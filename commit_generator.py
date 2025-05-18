@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# commit_generator.py - Standalone commit message generator
-
 import os
 import subprocess
 import shlex

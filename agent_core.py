@@ -31,13 +31,15 @@ Responda sempre em português brasileiro.
 """
 
 FORMAT_INSTRUCTIONS = """
-Quando precisar usar uma ferramenta, responda **apenas** com JSON válido.
+Quando precisar usar uma ferramenta, responda **somente** com JSON válido.
 
 Para chamar uma ferramenta:
 {{"tool": "<nome_da_ferramenta>", "tool_input": "<argumento_em_string>"}}
 
-Para encerrar e responder ao usuário:
-{{"answer": "<sua_resposta_final_ao_usuário>"}}
+Quando quiser encerrar e responder ao usuário:
+{{"final_answer": "<sua_resposta_final_ao_usuário>"}}
+
+Não inclua nenhum outro texto fora do JSON nem chaves adicionais.
 """
 
 
