@@ -24,21 +24,17 @@ def run_once(agent, prompt: str, no_direct: bool):
         print(f"Executando comando diretamente: {prompt}")
         return run_terminal(prompt)
     
-    # Special case for commit related commands
-    commit_patterns = ["commit", "commitar", "comitar", "comite", "commite"]
-    if any(pattern in prompt.lower() for pattern in commit_patterns):
-        # Handle different commit scenarios
-        staged_patterns = ["staged", "stage", "preparado", "adicionado"]
-        all_patterns = ["all", "todos", "tudo", "todas"]
-        message_patterns = ["message", "mensagem", "descri"]
+    # Tratamento simplificado para comandos de commit
+    commit_words = ["commit", "commitar", "comitar", "comite", "commite"]
+    
+    if any(word in prompt.lower() for word in commit_words):
+        all_patterns = ["all", "todos", "tudo", "todas", "tds", "everything"]
+        commit_all = any(pattern in prompt.lower() for pattern in all_patterns)
         
-        if any(pattern in prompt.lower() for pattern in staged_patterns):
-            print("Executando commit_staged diretamente")
-            return commit_staged()
-        elif any(pattern in prompt.lower() for pattern in all_patterns + message_patterns):
-            # Try to extract message from the prompt
+        if commit_all:
+            # Extrai a mensagem de commit, se houver
             message = ""
-            for pattern in ["message", "mensagem"]:
+            for pattern in ["message", "mensagem", "with", "com"]:
                 if pattern in prompt.lower():
                     parts = prompt.lower().split(pattern, 1)
                     if len(parts) > 1:
@@ -46,26 +42,59 @@ def run_once(agent, prompt: str, no_direct: bool):
                         break
             
             if not message or len(message) < 5:
-                message = "chore: auto commit with descriptive message"
+                # Se não houver mensagem específica, usa uma mensagem genérica
+                message = "chore: auto commit with all changes"
             
-            print(f"Executando commit com mensagem: {message}")
+            print(f"Executando commit de todas as alterações com mensagem: {message}")
             git("add -A")  # Stage all changes
             return git(f'commit -m "{message}"')
-        else:
-            # Default to commit staged
+            
+        elif "staged" in prompt.lower() or "stage" in prompt.lower():
+            # Apenas commita os arquivos que já estão staged
             print("Executando commit_staged diretamente")
             return commit_staged()
-        
+        else:
+            # Tenta determinar o que o usuário quer com base no texto
+            if "descri" in prompt.lower() or "mensagem" in prompt.lower() or "message" in prompt.lower():
+                # Provavelmente quer commitar todos com mensagem
+                message = prompt.split("message", 1)[-1].strip() if "message" in prompt.lower() else ""
+                if not message or len(message) < 5:
+                    message = prompt.split("mensagem", 1)[-1].strip() if "mensagem" in prompt.lower() else ""
+                if not message or len(message) < 5:
+                    message = "chore: auto commit based on user request"
+                
+                print(f"Executando commit com mensagem: {message}")
+                git("add -A")  # Stage all changes
+                return git(f'commit -m "{message}"')
+            else:
+                # Default: apenas commita os arquivos staged
+                print("Executando commit_staged diretamente")
+                return commit_staged()
+    
     try:
         return agent.invoke(prompt)["output"]
     except Exception as e:
         return f"Erro: {e}"
 
 def explain(user_input: str) -> str:
-    staged = git("diff --cached --name-only").splitlines()
-    if staged:
-        return f"Esta ação irá commitar {len(staged)} arquivo(s) staged."
-    return "Nenhum arquivo staged para commit."
+    # Verificar se o comando é para commitar tudo ou apenas arquivos staged
+    all_patterns = ["all", "todos", "tudo", "todas", "tds", "everything"]
+    commit_all = any(pattern in user_input.lower() for pattern in all_patterns)
+    
+    if commit_all:
+        # Conta tanto arquivos staged quanto não staged
+        staged = git("diff --cached --name-only").splitlines()
+        unstaged = git("diff --name-only").splitlines()
+        all_files = list(set(staged + unstaged))
+        if all_files:
+            return f"Esta ação irá commitar {len(all_files)} arquivo(s) (incluindo não staged)."
+        return "Nenhuma alteração para commitar."
+    else:
+        # Apenas arquivos staged
+        staged = git("diff --cached --name-only").splitlines()
+        if staged:
+            return f"Esta ação irá commitar {len(staged)} arquivo(s) staged."
+        return "Nenhum arquivo staged para commit."
 
 def main():
     parser = argparse.ArgumentParser()
