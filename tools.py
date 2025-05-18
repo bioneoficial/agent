@@ -30,6 +30,12 @@ def create_file(file_info: str) -> str:
             return "Formato incorreto. Use: 'caminho|conteúdo'"
         
         path, content = parts
+        # Sanitize: remove <think> blocks and markdown fences
+        content = re.sub(r'<think>[\s\S]*?</think>', '', content, flags=re.IGNORECASE).strip()
+        if content.startswith('```'):
+            content = '\n'.join(content.split('\n')[1:])
+            if content.endswith('```'):
+                content = '\n'.join(content.split('\n')[:-1])
         Path(path.strip()).expanduser().write_text(content)
         return f"Arquivo {path.strip()} criado com sucesso."
     except Exception as e:
@@ -87,5 +93,4 @@ RemoveFileTool = Tool("remove_file", remove_file,
 CommitAutoTool = Tool("commit_auto", lambda stage_all=False: commit_auto(stage_all),
                        description="Adiciona (opcionalmente) todas as mudanças e commita com mensagem gerada automaticamente")
 
-ALL_TOOLS = [TerminalTool, GitStatusTool, CommitStagedTool, FileRead, FileWrite, 
-             CreateFileTool, EditFileTool, RemoveFileTool, CommitAutoTool]
+ALL_TOOLS = [TerminalTool, CreateFileTool]

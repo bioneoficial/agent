@@ -10,7 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langgraph.graph import StateGraph, END
 
-from tools import ALL_TOOLS, run_terminal, git_status, FileRead, FileWrite, create_file, edit_file, remove_file
+from tools import ALL_TOOLS, run_terminal, create_file
 from llm_backend import get_llm
 
 # ---------------- System Messages ----------------
@@ -35,6 +35,19 @@ Para remover arquivos, use a ferramenta `remove_file`.
 
 Você deve ser proativo e útil, respondendo às perguntas do usuário com comandos ou informações precisas.
 Se um comando parecer ambíguo, peça clarificação.
+
+Para executar qualquer comando de shell (git, cat, rm, etc.), use a ferramenta 'terminal' passando o comando completo como input.
+
+**Criação/Edição de Arquivos:**
+- Você é capaz de gerar código ou conteúdo para diversos tipos de arquivos (ex: .js, .py, .cs, .ts, .md, .txt).
+- Se o usuário pedir para criar um arquivo e descrever seu conteúdo (ex: "crie um arquivo X com uma função que faz Y"), você DEVE:
+    1. Primeiro, gerar o código/conteúdo completo internamente.
+    2. Então, usar a ferramenta `create_file`. O `tool_input` DEVE ser uma string no formato `caminho/completo/do/arquivo.ext|CONTEÚDO_GERADO_AQUI`.
+    3. Exemplo: Para criar `pato.js` com uma função par/ímpar, o `tool_input` para `create_file` seria: `pato.js|function ehPar(numero) { return numero % 2 === 0; } // e o resto da função...`
+- NÃO use `create_file` sem um conteúdo explícito no formato `caminho|conteúdo`.
+
+Para ler conteúdo de arquivo, use `terminal` com `cat nome_do_arquivo`.
+Para sobrescrever ou criar, sempre use `create_file` (formato `caminho|conteúdo`).
 """
 
 CONVERSATIONAL_SYSTEM_MESSAGE = """Você é um assistente especializado em Git e Terminal.
