@@ -417,8 +417,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--interactive", "-i", action="store_true")
     parser.add_argument("--no-direct", "-n", action="store_true")
-    parser.add_argument("--mode", "-m", choices=["agent", "ask"], default="agent", 
-                        help="Starting mode: 'agent' for command execution or 'ask' for conversation")
+    parser.add_argument("--mode", "-m", choices=["agent", "ask", "free"], default="agent", 
+                        help="Modes: agent (tools), ask (conversação sem execução) ou free (LLM livre sem ferramentas)")
     parser.add_argument("query", nargs="*")
     args = parser.parse_args()
 
@@ -429,15 +429,18 @@ def main():
     global SHARED_LLM
     SHARED_LLM = shared_llm
     agent_mode = build_agent(agent_mode=True, shared_llm=shared_llm)
-    ask_mode_llm = build_agent(agent_mode=False, shared_llm=shared_llm)
+    raw_llm = build_agent(agent_mode=False, shared_llm=shared_llm)  # retorna apenas o llm
     print("Agents ready!")
 
     if not interactive:
         query = " ".join(args.query)
         if args.mode == "agent":
             print(run_once(agent_mode, query, args.no_direct))
-        else:
-            print(process_ask_mode(ask_mode_llm, query))
+        elif args.mode == "ask":
+            print(process_ask_mode(raw_llm, query))
+        else:  # free
+            response = raw_llm.invoke([SystemMessage(content="Você é um assistente e deve responder apenas texto."), HumanMessage(content=query)])
+            print(response.content)
         return
 
     # Create session state for interactive mode
@@ -461,12 +464,12 @@ def main():
             # Handle mode switching
             if text.lower().startswith("mode "):
                 new_mode = text.lower().split(" ")[1].strip()
-                if new_mode in ["agent", "ask"]:
+                if new_mode in ["agent", "ask", "free"]:
                     session["mode"] = new_mode
                     print(f"Switched to {new_mode.upper()} mode")
                     continue
                 else:
-                    print(f"Unknown mode: {new_mode}. Available modes: agent, ask")
+                    print(f"Unknown mode: {new_mode}. Available modes: agent, ask, free")
                     continue
                     
             # Process based on current mode
@@ -484,7 +487,7 @@ def main():
                 if len(session["last_commands"]) > 5:  # Keep last 5 commands
                     session["last_commands"] = session["last_commands"][-5:]
                     
-            else:  # Ask mode
+            elif session["mode"] == "ask":
                 # Add conversation context
                 context = ""
                 if session["conversation_history"] or session["last_commands"]:
@@ -501,7 +504,7 @@ def main():
                             context += f"- {cmd['command']}\n"
                 
                 # Process conversational query
-                result = process_ask_mode(ask_mode_llm, text, context, session["conversation_history"])
+                result = process_ask_mode(raw_llm, text, context, session["conversation_history"])
                 print(result)
                 
                 # Store in conversation history
@@ -518,6 +521,14 @@ def main():
                         result = run_once(agent_mode, text, args.no_direct)
                         print(result)
                         session["last_commands"].append({"command": text, "result": result})
+                
+            else:  # free mode
+                response = raw_llm.invoke([SystemMessage(content="Você é um assistente e deve responder apenas texto."), HumanMessage(content=text)])
+                print(response.content)
+                # store conversation simple history
+                session["conversation_history"].append({"question": text, "answer": response.content})
+                if len(session["conversation_history"]) > 10:
+                    session["conversation_history"] = session["conversation_history"][-10:]
                 
         except (KeyboardInterrupt, EOFError):
             break
