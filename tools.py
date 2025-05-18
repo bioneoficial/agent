@@ -21,6 +21,34 @@ def commit_staged() -> str:
         return "Nenhum arquivo staged para commit."
     return git_status('commit -m "chore: commit staged changes"')
 
+def create_file(file_info: str) -> str:
+    """Cria um arquivo com o conteúdo especificado. Formato: 'caminho|conteúdo'"""
+    try:
+        parts = file_info.split('|', 1)
+        if len(parts) != 2:
+            return "Formato incorreto. Use: 'caminho|conteúdo'"
+        
+        path, content = parts
+        Path(path.strip()).expanduser().write_text(content)
+        return f"Arquivo {path.strip()} criado com sucesso."
+    except Exception as e:
+        return f"Erro ao criar arquivo: {str(e)}"
+
+def edit_file(file_info: str) -> str:
+    """Edita um arquivo existente. Formato: 'caminho|conteúdo'"""
+    return create_file(file_info)
+
+def remove_file(filepath: str) -> str:
+    """Remove um arquivo especificado."""
+    try:
+        path = Path(filepath.strip()).expanduser()
+        if not path.exists():
+            return f"Arquivo {filepath} não encontrado."
+        path.unlink()
+        return f"Arquivo {filepath} removido com sucesso."
+    except Exception as e:
+        return f"Erro ao remover arquivo: {str(e)}"
+
 class _NoArgs(BaseModel): pass
 
 TerminalTool     = Tool("terminal",       run_terminal,  "Executa comando de shell")
@@ -32,5 +60,12 @@ FileRead  = Tool("read_file",  lambda p: Path(p).expanduser().read_text(),
 FileWrite = Tool("write_file", lambda s: Path(s.split('|',1)[0]).expanduser()
                                           .write_text(s.split('|',1)[1]) or "ok",
                  "Cria ou sobrescreve arquivo; arg: path|conteúdo")
+CreateFileTool = Tool("create_file", create_file, 
+                     "Cria arquivo com conteúdo; formato: 'arquivo.txt|conteúdo do arquivo'")
+EditFileTool = Tool("edit_file", edit_file,
+                    "Edita arquivo existente; formato: 'arquivo.txt|novo conteúdo'")
+RemoveFileTool = Tool("remove_file", remove_file,
+                      "Remove um arquivo; arg: path do arquivo")
 
-ALL_TOOLS = [TerminalTool, GitStatusTool, CommitStagedTool, FileRead, FileWrite]
+ALL_TOOLS = [TerminalTool, GitStatusTool, CommitStagedTool, FileRead, FileWrite, 
+             CreateFileTool, EditFileTool, RemoveFileTool]
