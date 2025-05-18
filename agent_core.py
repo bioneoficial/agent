@@ -1,8 +1,5 @@
-
 from __future__ import annotations
-
-import operator
-import uuid
+import operator, uuid, json
 from typing import Any, Dict, List, TypedDict, Annotated
 
 from langchain.agents import AgentExecutor, create_structured_chat_agent
@@ -15,95 +12,106 @@ from langgraph.graph import StateGraph, END
 from tools import ALL_TOOLS
 from llm_backend import get_llm
 
-SYSTEM_MESSAGE = """
-Você é um assistente de Git e Terminal especializado, aqui para ajudar com
-comandos de terminal, operações git, gerenciamento de arquivos e navegação
-de repositórios.
-
-Quando lidar com comandos Git e Terminal:
-1. Entenda o objetivo do usuário antes de agir.
-2. Explique brevemente o que você planeja fazer.
-3. Execute os comandos necessários.
-4. Sempre use mensagens de commit semânticas.
-5. Priorize segurança em comandos potencialmente prejudiciais.
-
-Responda sempre em português brasileiro.
-"""
-
+SYSTEM_MESSAGE = "Você é um assistente de Git e Terminal especializado."
 FORMAT_INSTRUCTIONS = """
-Quando precisar usar uma ferramenta, responda **somente** com JSON válido.
+Responda sempre com UM ÚNICO JSON válido, SEM nenhum texto adicional.
+Não inclua text antes ou depois do JSON.
+Não inclua comentários ou pensamentos no seu output.
+Estrutura:
+Ferramenta: {{"tool":"<nome_da_ferramenta>","tool_input":"<string>"}}
+Final:     {{"final_answer":"<texto final>"}}
 
-Para chamar uma ferramenta:
-{{"tool": "<nome_da_ferramenta>", "tool_input": "<argumento_em_string>"}}
-
-Quando quiser encerrar e responder ao usuário:
-{{"final_answer": "<sua_resposta_final_ao_usuário>"}}
-
-Não inclua nenhum outro texto fora do JSON nem chaves adicionais.
+Exemplo: {{"tool":"terminal","tool_input":"ls -la"}}
+Exemplo: {{"tool":"git_status","tool_input":"status"}}
+Exemplo: {{"tool":"commit_staged","tool_input":{{}}}}
+Exemplo: {{"final_answer":"Esse é o resultado final"}}
 """
-
 
 class InMemoryHistory(BaseChatMessageHistory):
-    def __init__(self):
-        self.messages: List[BaseMessage] = []
-
-    def add_message(self, message: BaseMessage) -> None:
-        self.messages.append(message)
-
-    def clear(self) -> None:
-        self.messages = []
-
+    def __init__(self): self.messages: List[BaseMessage] = []
+    def add_message(self, m: BaseMessage): self.messages.append(m)
+    def clear(self): self.messages = []
 
 def build_agent(verbose: bool = True):
     llm = get_llm()
-
-    system_template = (
-        SYSTEM_MESSAGE
-        + "\n\n"
-        + FORMAT_INSTRUCTIONS
-        + "\n\n# Ferramentas disponíveis\n{tools}"
-        + "\n\n(Para usar, refira-se pelo nome presente em {tool_names}.)"
-    )
-
-    prompt = ChatPromptTemplate.from_messages(
-        [
-            ("system", system_template),
-            MessagesPlaceholder("chat_history"),
-            ("user", "{input}"),
-            ("ai", "{agent_scratchpad}"),
-        ]
-    )
-
-    agent_chain = create_structured_chat_agent(llm, ALL_TOOLS, prompt)
-
-    agent_executor_core = AgentExecutor(
-        agent=agent_chain,
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", SYSTEM_MESSAGE + "\n" + FORMAT_INSTRUCTIONS +
+         "\nFerramentas:\n{tools}\n(Use nomes em {tool_names}.)"),
+        MessagesPlaceholder("chat_history"),
+        ("user", "{input}"),
+        ("ai", "{agent_scratchpad}"),
+    ])
+    chain = create_structured_chat_agent(llm, ALL_TOOLS, prompt)
+    
+    # Direct patch for agent execution
+    original_call = AgentExecutor._call
+    
+    def patched_call(self, *args, **kwargs):
+        try:
+            return original_call(self, *args, **kwargs)
+        except Exception as e:
+            # If we get a parsing error, try to extract and run the tool directly
+            if hasattr(e, '__cause__') and e.__cause__ and 'Could not parse LLM output' in str(e.__cause__):
+                output = str(e.__cause__)
+                # Try to find any tool invocation
+                import re
+                match = re.search(r'"tool"\s*:\s*"([^"]+)"\s*,\s*"tool_input"\s*:\s*(\{\}|\{[^}]*\}|"[^"]*")', output)
+                if match:
+                    tool_name = match.group(1)
+                    tool_input_raw = match.group(2)
+                    
+                    # Find the tool
+                    tool = next((t for t in self.tools if t.name == tool_name), None)
+                    if tool:
+                        # Parse the input
+                        if tool_input_raw in ['{}', '""', '']:
+                            tool_input = {}
+                        elif tool_input_raw.startswith('"') and tool_input_raw.endswith('"'):
+                            tool_input = tool_input_raw[1:-1]
+                        else:
+                            import json
+                            try:
+                                tool_input = json.loads(tool_input_raw)
+                            except:
+                                tool_input = {}
+                                
+                        # Execute the tool
+                        if verbose:
+                            print(f"Executing tool {tool_name} with input {tool_input}")
+                        result = tool.func(tool_input) if tool_input else tool.func()
+                        return {"output": f"Result: {result}"}
+            
+            # If no direct fix worked, raise the original error
+            raise e
+    
+    # Apply the patch
+    import types
+    AgentExecutor._call = types.MethodType(patched_call, AgentExecutor)
+    
+    executor = AgentExecutor(
+        agent=chain,
         tools=ALL_TOOLS,
         verbose=verbose,
-        return_intermediate_steps=True,
-        handle_parsing_errors=True,
+        return_intermediate_steps=False,
+        handle_parsing_errors="Saída inválida, envie somente o JSON.",
+        max_iterations=6,
     )
-
     store: Dict[str, InMemoryHistory] = {}
-
-    agent_with_history = RunnableWithMessageHistory(
-        agent_executor_core,
+    hist_chain = RunnableWithMessageHistory(
+        executor,
         lambda sid: store.get(sid, InMemoryHistory()),
         input_messages_key="input",
         history_messages_key="chat_history",
     )
-
     def run(prompt: str):
-        session_id = str(uuid.uuid4())
-        store[session_id] = InMemoryHistory()
-        return agent_with_history.invoke(
+        sid = str(uuid.uuid4())
+        store[sid] = InMemoryHistory()
+        return hist_chain.invoke(
             {"input": prompt},
-            config={"configurable": {"session_id": session_id}},
+            config={"configurable": {"session_id": sid}},
         )
-
     run.invoke = lambda p: run(p)
     return run
-
 
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
@@ -113,109 +121,20 @@ class AgentState(TypedDict):
     error: bool
     error_message: str | None
 
-
 def build_langgraph_agent(verbose: bool = True, max_iterations: int = 6):
     llm = get_llm()
-
     def agent_node(state: AgentState) -> Dict[str, Any]:
-        messages = state["messages"]
-        response = llm.invoke(messages)
-        from langchain_core.agents import AgentAction, AgentFinish
-        try:
-            action = llm.parse_ai_message(response)
-            return {
-                "next_action": action,
-                "messages": messages + [response],
-                "error": False,
-                "error_message": None,
-            }
-        except Exception as e:
-            return {
-                "messages": messages + [response],
-                "error": True,
-                "error_message": str(e),
-            }
-
-    def tool_node(state: AgentState) -> Dict[str, Any]:
-        from langchain_core.agents import AgentFinish
-        next_action = state["next_action"]
-        if next_action is None or isinstance(next_action, AgentFinish):
-            return state
-
-        tool = next((t for t in ALL_TOOLS if t.name == next_action.tool), None)
-        if tool is None:
-            obs = f"Tool {next_action.tool} not found."
-            return {
-                "last_observation": obs,
-                "messages": state["messages"] + [AIMessage(content=f"Erro: {obs}")],
-                "iteration": state["iteration"] + 1,
-                "error": True,
-                "error_message": obs,
-            }
-
-        try:
-            observation = (
-                tool.func(next_action.tool_input)
-                if next_action.tool_input is not None
-                else tool.func()
-            )
-            return {
-                "last_observation": observation,
-                "messages": state["messages"]
-                + [AIMessage(content=f"Observação: {observation}")],
-                "iteration": state["iteration"] + 1,
-                "error": False,
-                "error_message": None,
-            }
-        except Exception as e:
-            obs = f"Erro executando {tool.name}: {e}"
-            return {
-                "last_observation": obs,
-                "messages": state["messages"] + [AIMessage(content=f"Erro: {obs}")],
-                "iteration": state["iteration"] + 1,
-                "error": True,
-                "error_message": str(e),
-            }
-
-    def error_handler_node(state: AgentState) -> Dict[str, Any]:
-        return {
-            "messages": state["messages"]
-            + [AIMessage(content=f"Houve um erro: {state['error_message']}. Tente outra abordagem.")],
-            "next_action": None,
-        }
-
-    def router(state: AgentState) -> str:
-        from langchain_core.agents import AgentFinish
-        if state["iteration"] >= max_iterations:
-            return "finish"
-        if state["error"]:
-            return "error_handler"
-        if isinstance(state["next_action"], AgentFinish):
-            return "finish"
-        return "agent"
-
-    def final_node(state: AgentState) -> Dict[str, Any]:
         return {"messages": state["messages"]}
-
     workflow = StateGraph(AgentState)
     workflow.add_node("agent", agent_node)
-    workflow.add_node("tool", tool_node)
-    workflow.add_node("error_handler", error_handler_node)
-    workflow.add_node("finish", final_node)
-    workflow.add_edge("agent", "tool")
-    workflow.add_edge("tool", router)
-    workflow.add_edge("error_handler", "agent")
-    workflow.add_edge("finish", END)
-
+    workflow.add_edge("agent", END)
     return workflow.compile()
-
 
 def run_langgraph_agent(app, query: str, messages: List[BaseMessage] | None = None):
     if messages is None:
         messages = [HumanMessage(content=query)]
     else:
         messages.append(HumanMessage(content=query))
-
     result = app.invoke(
         {
             "messages": messages,
@@ -226,6 +145,5 @@ def run_langgraph_agent(app, query: str, messages: List[BaseMessage] | None = No
             "error_message": None,
         }
     )
-
     ai_msgs = [m for m in result["messages"] if isinstance(m, AIMessage)]
-    return ai_msgs[-1].content if ai_msgs else "Sem resposta gerada."
+    return ai_msgs[-1].content if ai_msgs else "Sem resposta."

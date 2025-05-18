@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# tests/test_tools.py - Basic tests for the tools module
-
 import os
 import sys
 import tempfile

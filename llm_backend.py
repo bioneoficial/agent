@@ -1,4 +1,3 @@
-# llm_backend.py
 from langchain_ollama.chat_models import ChatOllama
 
 def get_llm(model: str = "qwen3:14b"):
@@ -6,7 +5,6 @@ def get_llm(model: str = "qwen3:14b"):
     try:
         print(f"Initializing {model} model...")
         llm = ChatOllama(model=model)
-        llm.invoke("ping")          # 1-token health-check
         print(f"Model {model} initialized successfully.")
         return llm
     except Exception as e:
