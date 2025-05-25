@@ -1,0 +1,26 @@
+#!/bin/bash
+
+# Git Terminal Assistant (GTA) - Global Command
+# This script allows calling the assistant from anywhere in the system
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Path to the main Python script
+MAIN_SCRIPT="$SCRIPT_DIR/main.py"
+
+# Path to virtual environment
+VENV_PATH="$SCRIPT_DIR/venv"
+
+# Check if virtual environment exists
+if [ -d "$VENV_PATH" ]; then
+    # Activate virtual environment and run the script
+    source "$VENV_PATH/bin/activate"
+    python "$MAIN_SCRIPT" "$@"
+    deactivate
+else
+    # Try to run without virtual environment (fallback)
+    echo "Warning: Virtual environment not found at $VENV_PATH"
+    echo "Attempting to run with system Python..."
+    python3 "$MAIN_SCRIPT" "$@"
+fi 
