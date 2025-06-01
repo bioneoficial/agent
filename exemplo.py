@@ -26,18 +26,17 @@ class Pessoa:
 
         Erros:
             - TypeError: Se algum parâmetro não for do tipo esperado.
+            - ValueError: Se a idade não for um número inteiro positivo.
         """
-        try:
-            if not isinstance(nome, str):
-                raise TypeError("Nome precisa ser uma string")
-            if not isinstance(idade, int) or idade < 0:
-                raise ValueError("Idade precisa ser um número inteiro positivo")
+        if not isinstance(nome, str):
+            raise TypeError("Nome precisa ser uma string")
+        if not isinstance(idade, (int, float)):
+            raise TypeError("Idade precisa ser um número")
+        if not isinstance(idade, int) or idade < 0:
+            raise ValueError("Idade precisa ser um número inteiro positivo")
 
-            self.nome = nome
-            self.idade = idade
-
-        except Exception as e:
-            print(f"Erro ao criar pessoa: {str(e)}")
+        self.nome = nome
+        self.idade = idade
 
 
     def calcular_idade(self):
