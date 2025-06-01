@@ -22,9 +22,20 @@ class Orchestrator:
         
         # Fallback for terminal commands
         self.terminal_commands = {
+            # Navegação e listagem
             "ls", "pwd", "cd", "mkdir", "rmdir", "cp", "mv", "rm", "touch",
             "cat", "grep", "find", "head", "tail", "wc", "sort", "uniq",
-            "echo", "which", "file", "tree", "du", "df"
+            "echo", "which", "file", "tree", "du", "df",
+            # Terminal e sessão
+            "clear", "history", "exit", "logout", "whoami", "sudo",
+            # Processos e sistema
+            "ps", "top", "htop", "kill", "pkill", "fg", "bg", "jobs", "uptime",
+            # Rede
+            "ping", "ifconfig", "ip", "netstat", "ssh", "scp", "rsync", "wget", "curl",
+            # Arquivos e arquivamento
+            "tar", "zip", "unzip", "gzip", "gunzip", "chmod", "chown", "chgrp",
+            # Informações
+            "man", "info", "date", "cal", "free", "env", "export", "printenv"
         }
         
     def process_request(self, request: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
