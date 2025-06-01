@@ -1,29 +1,29 @@
-# Git Terminal Assistant (GTA) - Multi-Agent Architecture
+# Git Terminal Assistant (GTA) - TCC
 
-GTA é um assistente inteligente de terminal que utiliza uma arquitetura multi-agente para executar operações Git, criar e editar arquivos de código, e gerar testes unitários automaticamente.
+GTA é um assistente inteligente de terminal que utiliza uma arquitetura multi-agente para executar operações Git e criar/editar arquivos de código. O sistema é focado especialmente em gerar mensagens de commit semânticas seguindo o padrão Conventional Commits.
 
 ## Arquitetura
 
 O sistema utiliza agentes especializados, cada um focado em um domínio específico:
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   Git Agent     │    │   Code Agent     │    │   Test Agent    │
-│                 │    │                  │    │                 │
-│ • Commit msgs   │    │ • File creation  │    │ • Read code     │
-│ • Git commands  │    │ • Code editing   │    │ • Generate tests│
-│ • Status/diff   │    │ • Content gen    │    │ • Test analysis │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-                    ┌─────────────────┐
-                    │ Orchestrator    │
-                    │                 │
-                    │ • Route requests│
-                    │ • Coordinate    │
-                    │ • Session mgmt  │
-                    └─────────────────┘
+┌─────────────────┐    ┌──────────────────┐
+│   Git Agent     │    │   Code Agent     │
+│                 │    │                  │
+│ • Commit msgs   │    │ • File creation  │
+│ • Git commands  │    │ • Code editing   │
+│ • Status/diff   │    │ • Content gen    │
+└─────────────────┘    └──────────────────┘
+         │                       │        
+         └───────────────────────┘        
+                   │                      
+          ┌─────────────────┐             
+          │ Orchestrator    │             
+          │                 │             
+          │ • Route requests│             
+          │ • Coordinate    │             
+          │ • Handle errors │             
+          └─────────────────┘             
 ```
 
 ## Características Principais
@@ -32,16 +32,13 @@ O sistema utiliza agentes especializados, cada um focado em um domínio específ
 - Gera mensagens de commit inteligentes seguindo Conventional Commits
 - Executa comandos git com segurança
 - Analisa diffs e status do repositório
+- Categoriza alterações de arquivos para determinar o tipo de commit (feat, fix, etc.)
+- Formata automaticamente mensagens seguindo padrões de commits convencionais
 
 ### 2. **CodeAgent** - Especialista em Código
 - Cria arquivos de código em qualquer linguagem
 - Edita arquivos existentes de forma inteligente
 - Gera código limpo e funcional com base em descrições
-
-### 3. **TestAgent** - Especialista em Testes
-- Gera testes unitários para arquivos de código
-- Suporta múltiplos frameworks (pytest, jest, junit, etc.)
-- Analisa código para sugerir casos de teste
 
 ## Instalação
 
@@ -96,17 +93,7 @@ criar arquivo Button.jsx componente React de botão
 criar arquivo User.java classe de usuário com getters e setters
 ```
 
-### Geração de Testes
-```bash
-# Gerar testes para um arquivo
-gerar testes para utils.py
 
-# Analisar o que precisa ser testado
-analisar utils.py para testes
-
-# Gerar testes para múltiplos arquivos
-gerar testes para arquivos python
-```
 
 ### Comandos de Terminal
 ```bash
@@ -154,7 +141,6 @@ tcc/
 │   ├── base_agent.py      # Classe base com sanitização
 │   ├── git_agent.py       # Operações Git
 │   ├── code_agent.py      # Criação/edição de código
-│   ├── test_agent.py      # Geração de testes
 │   └── orchestrator.py    # Roteador de requisições
 ├── main.py                # Entry point
 ├── llm_backend.py         # Configuração do LLM

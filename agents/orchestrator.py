@@ -2,7 +2,6 @@ from typing import Dict, Any, List, Optional
 from agents.base_agent import BaseAgent
 from agents.git_agent import GitAgent
 from agents.code_agent import CodeAgent
-from agents.test_agent import TestAgent
 import subprocess
 import shlex
 
@@ -10,11 +9,9 @@ class Orchestrator:
     """Main orchestrator that routes requests to appropriate specialized agents"""
     
     def __init__(self):
-        # Initialize all specialized agents
         self.agents = [
             GitAgent(),
-            CodeAgent(),
-            TestAgent()
+            CodeAgent()
         ]
         
         # Fallback for terminal commands
@@ -113,26 +110,52 @@ class Orchestrator:
         return False
     
     def _handle_unclear_request(self, request: str) -> Dict[str, Any]:
-        """Handle requests that don't clearly match any agent"""
-        # Analyze request to suggest which agent might help
+        """Handle requests that don't clearly match any agent by focusing on Git intent detection"""
         request_lower = request.lower()
         
+        # Check for Git-related keywords with more comprehensive patterns
+        git_keywords = [
+            'git', 'commit', 'branch', 'merge', 'pull', 'push', 'clone', 'fetch',
+            'status', 'log', 'diff', 'stage', 'checkout', 'versão', 'version',
+            'versionamento', 'history', 'staged', 'changes', 'modificações'
+        ]
+        
+        code_keywords = [
+            'arquivo', 'file', 'código', 'code', 'escrever', 'write', 'criar', 
+            'create', 'editar', 'edit', 'programa', 'program', 'função', 'function'
+        ]
+        
+        # Detect primary intent
+        git_score = sum(1 for word in git_keywords if word in request_lower)
+        code_score = sum(1 for word in code_keywords if word in request_lower)
+        
         suggestions = []
-        if any(word in request_lower for word in ['arquivo', 'file', 'código', 'code']):
+        
+        # Prioritize Git-related suggestions
+        if git_score > 0:
+            suggestions.append("Use 'git status' to see repository status")
+            suggestions.append("Use 'git diff' to see file changes")
+            suggestions.append("Use 'generate commit message' for intelligent commit messages")
+            suggestions.append("Use 'commit changes' to stage and commit with generated message")
+            
+            # Try to detect if this might be a git command with typos
+            if any(cmd in request_lower for cmd in ['stat', 'statu', 'status']):
+                return self.agents[0].process('git status')
+            if any(cmd in request_lower for cmd in ['diff', 'changes', 'mudanças']):
+                return self.agents[0].process('git diff')
+            if any(cmd in request_lower for cmd in ['commit', 'save', 'salvar']) and \
+               any(word in request_lower for word in ['message', 'mensagem', 'msg']):
+                return self.agents[0].process('generate commit message')
+        
+        # Add code-related suggestions if needed
+        if code_score > 0 and len(suggestions) < 4:
             suggestions.append("Use 'criar arquivo X.py' to create a code file")
             suggestions.append("Use 'editar arquivo X.py' to edit a file")
-        
-        if any(word in request_lower for word in ['git', 'versão', 'version']):
-            suggestions.append("Use 'git status' to see repository status")
-            suggestions.append("Use 'commit com mensagem descritiva' for intelligent commits")
-        
-        if any(word in request_lower for word in ['test', 'teste']):
-            suggestions.append("Use 'gerar testes para arquivo.py' to generate unit tests")
         
         if suggestions:
             return {
                 "success": False,
-                "output": f"I couldn't understand your request. Here are some suggestions:\n\n" + 
+                "output": f"Não entendi completamente seu pedido. Aqui estão algumas sugestões:\n\n" + 
                          "\n".join(f"• {s}" for s in suggestions),
                 "type": "help",
                 "suggestions": suggestions
@@ -140,7 +163,7 @@ class Orchestrator:
         else:
             return {
                 "success": False,
-                "output": "I couldn't understand your request. Please be more specific or try rephrasing.",
+                "output": "Não entendi seu pedido. Por favor, seja mais específico ou tente reescrever.",
                 "type": "error"
             }
     
@@ -160,13 +183,6 @@ class Orchestrator:
             "Edit existing files",
             "Generate code from descriptions",
             "Read file contents"
-        ]
-        
-        capabilities["TestAgent"] = [
-            "Generate unit tests for code files",
-            "Analyze code to suggest test cases",
-            "Support multiple testing frameworks",
-            "Create test files with proper naming"
         ]
         
         return capabilities 

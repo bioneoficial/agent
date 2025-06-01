@@ -23,6 +23,9 @@ class BaseAgent(ABC):
             if len(lines) > 2:
                 response = '\n'.join(lines[1:-1])
         
+        # Remove trailing backticks if present
+        response = re.sub(r'```$', '', response).strip()
+        
         return response.strip()
     
     @abstractmethod
