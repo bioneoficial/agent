@@ -808,6 +808,18 @@ Retorne APENAS a mensagem de commit no formato: type(scope): description
             response = self.llm.invoke(prompt).content
             message = response.strip()
             
+            # Extrair apenas a mensagem de commit quando o LLM retorna texto explicativo
+            # Procurar por padrões comuns onde a mensagem real está entre backticks ou aspas
+            backtick_match = re.search(r'`([^`]+)`', message)
+            if backtick_match:
+                # Usar apenas o conteúdo entre backticks
+                message = backtick_match.group(1).strip()
+            else:
+                # Tentar encontrar mensagem entre aspas
+                quote_match = re.search(r'"([^"]+)"', message)
+                if quote_match:
+                    message = quote_match.group(1).strip()
+            
             # Ensure message follows conventional commits format
             message = self._fix_commit_format(message)
             
@@ -1057,6 +1069,17 @@ Retorne APENAS a mensagem de commit no formato: type(scope): description
         This function takes a commit message and attempts to format it according to
         Conventional Commits standard if it doesn't already conform.
         """
+        # Remover frases introdutórias comuns
+        intro_phrases = [
+            "Aqui está a mensagem de commit:", "Aqui está a mensagem de commit semântica:",
+            "A mensagem de commit é:", "Mensagem de commit:", "Mensagem semântica:",
+            "Here is the commit message:", "The commit message is:", "Commit message:"
+        ]
+        
+        for phrase in intro_phrases:
+            if message.startswith(phrase):
+                message = message[len(phrase):].strip()
+        
         # Common commit types
         valid_types = ['feat', 'fix', 'docs', 'style', 'refactor', 'test', 'chore', 'perf', 'ci', 'build']
         
