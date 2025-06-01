@@ -1156,8 +1156,12 @@ Retorne APENAS a mensagem de commit no formato: type(scope): description
         if not msg_result["success"]:
             return msg_result
         
-        # Then commit with the generated message
-        commit_result = self._safe_git_command(f'commit -m "{msg_result["output"]}"')
+        # Sanitize the commit message to prevent shell injection and escape quotes
+        # Remove newlines and escape quotes
+        sanitized_message = msg_result["output"].strip().replace('"', '\\"').replace("'", "\\'").replace('\n', ' ')
+        
+        # Then commit with the sanitized message
+        commit_result = self._safe_git_command(f'commit -m "{sanitized_message}"')
         return {
             "success": commit_result["success"],
             "output": commit_result["output"],

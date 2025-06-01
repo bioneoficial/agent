@@ -2,6 +2,7 @@ from typing import Dict, Any, List, Optional
 from agents.base_agent import BaseAgent
 from agents.git_agent import GitAgent
 from agents.code_agent import CodeAgent
+from agents.file_agent import FileAgent
 import subprocess
 import shlex
 
@@ -10,8 +11,9 @@ class Orchestrator:
     
     def __init__(self):
         self.agents = [
-            GitAgent(),
-            CodeAgent()
+            FileAgent(),  # FileAgent tem prioridade para comandos de arquivo
+            GitAgent(),   # GitAgent processa comandos relacionados a git
+            CodeAgent()   # CodeAgent como fallback para comandos gerais
         ]
         
         # Fallback for terminal commands
