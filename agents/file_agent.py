@@ -74,8 +74,16 @@ IMPORTANTE: Retorne APENAS o código/conteúdo solicitado, sem explicações adi
             r'\bversionar\b', r'\bstage\b', r'\badicionar\s+ao\s+commit\b'
         ]
         
-        # Se parece claramente com um comando git, rejeitar
-        if any(re.search(pattern, request_lower) for pattern in git_command_patterns):
+        # Detectar explicitamente comandos de teste para rejeitar (estes serão tratados pelo TestAgent)
+        test_command_patterns = [
+            r'gerar\s+testes', r'criar\s+testes', r'implementar\s+testes',
+            r'testar\s+arquivo', r'testar\s+classe', r'testar\s+função',
+            r'analisar\s+.*\s+para\s+testes', r'verificar\s+cobertura\s+de\s+testes',
+            r'executar\s+testes', r'rodar\s+testes', r'\btdd\b', r'\bunittest\b', r'\bpytest\b'
+        ]
+        
+        # Se parece claramente com um comando git ou teste, rejeitar
+        if any(re.search(pattern, request_lower) for pattern in git_command_patterns + test_command_patterns):
             return False
             
         # Comandos explícitos de alta prioridade para FileAgent

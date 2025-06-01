@@ -3,6 +3,8 @@ from agents.base_agent import BaseAgent
 from agents.git_agent import GitAgent
 from agents.code_agent import CodeAgent
 from agents.file_agent import FileAgent
+from agents.test_agent import TestAgent
+from agents.chat_agent import ChatAgent
 import subprocess
 import shlex
 
@@ -12,7 +14,9 @@ class Orchestrator:
     def __init__(self):
         self.agents = [
             FileAgent(),  # FileAgent tem prioridade para comandos de arquivo
+            TestAgent(),  # TestAgent processa comandos relacionados a testes
             GitAgent(),   # GitAgent processa comandos relacionados a git
+            ChatAgent(),  # ChatAgent para perguntas e solicitações de informação
             CodeAgent()   # CodeAgent como fallback para comandos gerais
         ]
         

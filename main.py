@@ -70,6 +70,36 @@ def interactive_mode():
         except Exception as e:
             print(f"Error: {str(e)}")
 
+def show_agents():
+    """Show available agents and their capabilities"""
+    global orchestrator
+    
+    if not orchestrator:
+        print("Orchestrator not initialized yet.")
+        return
+    
+    print("\nAvailable Agents:\n" + "=" * 17)
+    for agent in orchestrator.agents:
+        print(f"\n{agent.name}")
+        print("-" * len(agent.name))
+        
+        if agent.name == "FileAgent":
+            print("Handles: Criação, edição, análise e refatoração de arquivos")
+            print("Examples: criar arquivo, editar arquivo, analisar código, refatorar arquivo")
+        elif agent.name == "TestAgent":
+            print("Handles: Geração e análise de testes automatizados")
+            print("Examples: gerar testes para, analisar cobertura, testar arquivo")
+        elif agent.name == "GitAgent":
+            print("Handles: Operações Git e mensagens de commit semânticas")
+            print("Examples: git status, git commit, adicionar e commitar")
+        elif agent.name == "ChatAgent":
+            print("Handles: Respostas a perguntas e informações sem executar ações")
+            print("Examples: como rodar testes, o que é TDD, qual o comando para...")
+        elif agent.name == "CodeAgent":
+            print("Handles: Operações gerais de código (fallback)")
+            print("Examples: explicar código, documentar função, otimizar algoritmo")
+    print()
+
 def show_help():
     """Show help information"""
     help_text = """
