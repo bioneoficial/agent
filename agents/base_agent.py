@@ -7,10 +7,19 @@ import re
 class BaseAgent(ABC):
     """Base class for all specialized agents"""
     
-    def __init__(self, name: str, system_prompt: str):
+    def __init__(self, name: str, system_prompt: str, model: str = None):
+        """
+        Inicializa um agente especializado
+        
+        Args:
+            name: Nome do agente
+            system_prompt: Prompt de sistema para o LLM
+            model: Nome do modelo (opcional, se não informado, usa configuração)
+        """
         self.name = name
         self.system_prompt = system_prompt
-        self.llm = get_llm()
+        # Usa o modelo especificado ou busca na configuração baseado no nome do agente
+        self.llm = get_llm(model=model, agent_name=name)
         
     def sanitize_llm_response(self, response: str) -> str:
         """Remove thinking tags and other artifacts from LLM responses"""
