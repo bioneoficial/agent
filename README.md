@@ -4,27 +4,50 @@ GTA é um assistente inteligente de terminal que utiliza uma arquitetura multi-a
 
 ## Arquitetura
 
-O sistema utiliza agentes especializados, cada um focado em um domínio específico:
+O sistema utiliza uma arquitetura de agentes especializados, otimizada para eficiência e manutenibilidade. A arquitetura atual foi simplificada para três agentes principais:
 
 ```
-┌─────────────────┐    ┌──────────────────┐
-│   Git Agent     │    │   Code Agent     │
-│                 │    │                  │
-│ • Commit msgs   │    │ • File creation  │
-│ • Git commands  │    │ • Code editing   │
-│ • Status/diff   │    │ • Content gen    │
-└─────────────────┘    └──────────────────┘
-         │                       │        
-         └───────────────────────┘        
-                   │                      
-          ┌─────────────────┐             
-          │ Orchestrator    │             
-          │                 │             
-          │ • Route requests│             
-          │ • Coordinate    │             
-          │ • Handle errors │             
-          └─────────────────┘             
+┌─────────────────┐    ┌───────────────────────────────────────┐
+│   Git Agent     │    │            Code Agent                 │
+│                 │    │                                       │
+│ • Git commands  │    │ • File operations (create/edit/read) │
+│ • Commit msgs   │    │ • Test execution & generation       │
+│ • Status/diff   │    │ • Code analysis & refactoring      │
+└─────────────────┘    │ • Project structure management     │
+         │             └───────────────────────────────────────┘
+         │
+         │             ┌──────────────────┐
+         └─────────────┤   Chat Agent     │
+                       │                  │
+                       │ • General Q&A    │
+                       │ • Documentation  │
+                       └──────────────────┘
+                               │
+                      ┌────────┴────────┐
+                      │   Orchestrator   │
+                      │                  │
+                      │ • Route requests │
+                      │ • Handle errors  │
+                      └──────────────────┘
 ```
+
+### Agentes Principais
+
+1. **GitAgent**
+   - Comandos e operações Git
+   - Mensagens de commit semânticas
+   - Gerenciamento de branches e repositórios
+
+2. **CodeAgent** (Consolidado)
+   - Operações de arquivo (criar/editar/ler)
+   - Execução e geração de testes
+   - Análise e refatoração de código
+   - Gerenciamento de estrutura de projetos
+
+3. **ChatAgent**
+   - Respostas a perguntas gerais
+   - Documentação e ajuda
+   - Suporte a tarefas diversas
 
 ## Características Principais
 
@@ -34,11 +57,34 @@ O sistema utiliza agentes especializados, cada um focado em um domínio específ
 - Analisa diffs e status do repositório
 - Categoriza alterações de arquivos para determinar o tipo de commit (feat, fix, etc.)
 - Formata automaticamente mensagens seguindo padrões de commits convencionais
+- Gerencia branches e operações de repositório remoto
 
-### 2. **CodeAgent** - Especialista em Código
-- Cria arquivos de código em qualquer linguagem
-- Edita arquivos existentes de forma inteligente
-- Gera código limpo e funcional com base em descrições
+### 2. **CodeAgent** - Especialista em Código (Consolidado)
+- **Operações de Arquivo**
+  - Criação, edição e leitura de arquivos
+  - Suporte a múltiplas linguagens de programação
+  - Backup automático de arquivos durante edições
+  
+- **Testes**
+  - Execução de testes unitários e de integração
+  - Geração de testes automatizados
+  - Análise de cobertura de testes
+  
+- **Análise e Refatoração**
+  - Análise estática de código
+  - Sugestões de refatoração
+  - Verificação de estilo e boas práticas
+  
+- **Gerenciamento de Projetos**
+  - Criação de estrutura de projetos
+  - Visualização de hierarquia de arquivos
+  - Gerenciamento de dependências
+
+### 3. **ChatAgent** - Assistente de Desenvolvimento
+- Respostas a perguntas técnicas
+- Explicação de conceitos de programação
+- Ajuda com documentação e boas práticas
+- Suporte a tarefas gerais de desenvolvimento
 
 ## Instalação
 
@@ -96,8 +142,40 @@ criar arquivo User.java classe de usuário com getters e setters
 
 
 ### Comandos de Terminal
+
+O GTA suporta uma variedade de comandos de terminal nativos, incluindo:
+
+- Navegação e listagem: `ls`, `pwd`, `cd`, `mkdir`, `find`
+- Gerenciamento de arquivos: `cat`, `grep`, `head`, `tail`
+- Processos e sistema: `ps`, `top`, `htop`
+- Rede: `ping`, `ssh`, `curl`, `wget`
+
+Exemplos:
 ```bash
 # Comandos diretos funcionam normalmente
+ls -la
+cd meudiretorio
+```
+
+### Comandos Específicos do GTA
+
+```bash
+# Operações Git
+gta "commit com mensagem descritiva"
+gta "criar branch feature/nova-funcionalidade"
+
+# Operações de Código
+gta "criar arquivo utils.py com funções úteis"
+gta "executar testes em test_meucodigo.py"
+
+# Análise de Código
+gta "analisar complexidade ciclomática"
+gta "sugerir melhorias de performance"
+
+# Gerenciamento de Projeto
+gta "mostrar estrutura do projeto"
+gta "criar estrutura de projeto Python"
+```
 ls -la
 pwd
 cat arquivo.txt

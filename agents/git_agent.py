@@ -108,6 +108,23 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
         else:
             return self._execute_git_command(request)
     
+    def _find_git_root(self, path: str = None) -> str:
+        """Find the root directory of the git repository"""
+        if path is None:
+            path = os.getcwd()
+            
+        # Check if current directory is a git repo
+        if os.path.exists(os.path.join(path, '.git')):
+            return path
+            
+        # Move up one directory
+        parent = os.path.dirname(path)
+        if parent == path:
+            # At root directory, no .git found
+            return None
+            
+        return self._find_git_root(parent)
+    
     def _safe_git_command(self, cmd: str) -> Dict[str, Any]:
         """Safely execute a git command with improved error handling"""
         try:
@@ -120,12 +137,22 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
                     "warning": "potentially_destructive"
                 }
             
-            # Run the git command
+            # Find git repository root
+            repo_root = self._find_git_root()
+            if repo_root is None:
+                return {
+                    "success": False,
+                    "output": "Not a git repository (or any parent up to mount point /)",
+                    "type": "git_command",
+                    "error_type": "not_a_repository"
+                }
+            
+            # Run the git command in the repository root
             result = subprocess.run(
                 ["git"] + shlex.split(cmd),
                 text=True,
                 capture_output=True,
-                cwd=os.getcwd()
+                cwd=repo_root
             )
             
             success = result.returncode == 0
@@ -459,6 +486,7 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
         ui_related = False
         test_related = False
         performance_related = False
+        refactor_related = False
         file_languages = {}  # Armazena a linguagem de cada arquivo modificado
         
         # Security-related patterns (expandidos)

@@ -4,6 +4,8 @@ Git Terminal Assistant - Multi-Agent Architecture
 Main entry point with simplified interface
 """
 
+__version__ = "0.2.0"
+
 import sys
 import argparse
 from typing import Dict, Any, Optional
@@ -102,9 +104,9 @@ def show_agents():
 
 def show_help():
     """Show help information"""
-    help_text = """
-Available Commands:
-===================
+    help_text = f"""
+Git Terminal Assistant v{__version__} - Help
+{'=' * 50}
 
 Git Operations:
   git status                    - Show repository status
@@ -125,9 +127,10 @@ Terminal Commands:
   ls, pwd, cat, etc.           - Direct terminal commands
 
 Special Commands:
-  help                         - Show this help
+  help, ?                      - Show this help
   agents                       - Show available agents
-  exit                         - Exit the assistant
+  version                      - Show version information
+  exit, quit, q                - Exit the assistant
 """
     print(help_text)
 
@@ -154,36 +157,41 @@ def main():
     parser = argparse.ArgumentParser(description="Git Terminal Assistant")
     parser.add_argument("command", nargs="*", help="Command to execute")
     parser.add_argument("-i", "--interactive", action="store_true", 
-                       help="Run in interactive mode")
-    
+                      help="Run in interactive mode")
+    parser.add_argument("-v", "--version", action="store_true", 
+                      help="Show version information")
     args = parser.parse_args()
+    
+    # Handle version flag
+    if args.version:
+        print(f"Git Terminal Assistant v{__version__}")
+        sys.exit(0)
+    
+    # Initialize the orchestrator
+    global orchestrator
+    orchestrator = Orchestrator()
+    
+    # If command line arguments were provided, execute the command and exit
+    if args.command:
+        command = ' '.join(args.command)
+        # Handle version command
+        if command.lower() in ['version', '--version', '-v']:
+            print(f"Git Terminal Assistant v{__version__}")
+            sys.exit(0)
+            
+        result = orchestrator.process_request(command)
+        print_result(result)
+        sys.exit(0 if result.get('success') else 1)
     
     # If no command and not interactive, default to interactive
     if not args.command and not args.interactive:
         args.interactive = True
-    
+        
     if args.interactive:
         interactive_mode()
     else:
-        # Single command mode
-        global orchestrator
-        orchestrator = Orchestrator()
-        
-        command = " ".join(args.command)
-        
-        # Handle special commands even in non-interactive mode
-        if command.lower() in ['help', 'h', '?']:
-            show_help()
-            sys.exit(0)
-        elif command.lower() == 'agents':
-            show_agents()
-            sys.exit(0)
-        
-        result = orchestrator.process_request(command)
-        print_result(result)
-        
-        # Return appropriate exit code
-        sys.exit(0 if result.get('success') else 1)
+        print("No command provided. Use --help for usage information.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 
