@@ -1,81 +1,247 @@
-# macOS AI Terminal Assistant (TCC Project)
+# Git Terminal Assistant (GTA) - TCC
 
-Este projeto é um assistente de IA para o terminal macOS, desenvolvido como parte de um Trabalho de Conclusão de Curso (TCC) em Sistemas de Informação. O objetivo é criar um agente capaz de auxiliar em tarefas diárias no terminal, como automação de comandos Git, navegação no sistema de arquivos, e execução de comandos comuns.
+GTA é um assistente inteligente de terminal que utiliza uma arquitetura multi-agente para executar operações Git e criar/editar arquivos de código. O sistema é focado especialmente em gerar mensagens de commit semânticas seguindo o padrão Conventional Commits.
 
-## Tecnologias Utilizadas
+## Arquitetura
 
-*   **LLM:** Ollama (rodando localmente com modelos como `phi3:mini`)
-*   **Framework do Agente:** LangChain (Python)
-*   **Linguagem:** Python 3
-*   **Ambiente:** macOS
+O sistema utiliza uma arquitetura de agentes especializados, otimizada para eficiência e manutenibilidade. A arquitetura atual foi simplificada para três agentes principais:
 
-## Configuração do Ambiente
+```
+┌─────────────────┐    ┌───────────────────────────────────────┐
+│   Git Agent     │    │            Code Agent                 │
+│                 │    │                                       │
+│ • Git commands  │    │ • File operations (create/edit/read) │
+│ • Commit msgs   │    │ • Test execution & generation       │
+│ • Status/diff   │    │ • Code analysis & refactoring      │
+└─────────────────┘    │ • Project structure management     │
+         │             └───────────────────────────────────────┘
+         │
+         │             ┌──────────────────┐
+         └─────────────┤   Chat Agent     │
+                       │                  │
+                       │ • General Q&A    │
+                       │ • Documentation  │
+                       └──────────────────┘
+                               │
+                      ┌────────┴────────┐
+                      │   Orchestrator   │
+                      │                  │
+                      │ • Route requests │
+                      │ • Handle errors  │
+                      └──────────────────┘
+```
 
-1.  **Pré-requisitos:**
-    *   macOS
-    *   [Homebrew](https://brew.sh/) instalado.
-    *   Python 3.10+ instalado (pode ser via Homebrew: `brew install python`)
-    *   Git instalado (pode ser via Homebrew: `brew install git`)
+### Agentes Principais
 
-2.  **Clone o Repositório (se aplicável):**
-    ```bash
-    # Se você for clonar de um repositório remoto:
-    # git clone git@github.com:bioneoficial/agent.git
-    # cd agent
-    ```
+1. **GitAgent**
+   - Comandos e operações Git
+   - Mensagens de commit semânticas
+   - Gerenciamento de branches e repositórios
 
-3.  **Instale o Ollama:**
-    ```bash
-    brew install ollama
-    ```
+2. **CodeAgent** (Consolidado)
+   - Operações de arquivo (criar/editar/ler)
+   - Execução e geração de testes
+   - Análise e refatoração de código
+   - Gerenciamento de estrutura de projetos
 
-4.  **Inicie o Ollama e Baixe um Modelo:**
-    Abra um terminal separado e execute:
-    ```bash
-    ollama serve
-    ```
-    Em outro terminal (ou após o `serve` iniciar), baixe um modelo (ex: `phi3:mini`):
-    ```bash
-    ollama pull phi3:mini
-    ```
-    *Nota: Mantenha o terminal com `ollama serve` rodando enquanto utiliza o agente.*
+3. **ChatAgent**
+   - Respostas a perguntas gerais
+   - Documentação e ajuda
+   - Suporte a tarefas diversas
 
-5.  **Crie e Ative o Ambiente Virtual Python:**
-    No diretório raiz do projeto:
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate
-    ```
+## Características Principais
 
-6.  **Instale as Dependências Python:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+### 1. **GitAgent** - Especialista em Versionamento
+- Gera mensagens de commit inteligentes seguindo Conventional Commits
+- Executa comandos git com segurança
+- Analisa diffs e status do repositório
+- Categoriza alterações de arquivos para determinar o tipo de commit (feat, fix, etc.)
+- Formata automaticamente mensagens seguindo padrões de commits convencionais
+- Gerencia branches e operações de repositório remoto
 
-## Como Rodar o Agente
+### 2. **CodeAgent** - Especialista em Código (Consolidado)
+- **Operações de Arquivo**
+  - Criação, edição e leitura de arquivos
+  - Suporte a múltiplas linguagens de programação
+  - Backup automático de arquivos durante edições
+  
+- **Testes**
+  - Execução de testes unitários e de integração
+  - Geração de testes automatizados
+  - Análise de cobertura de testes
+  
+- **Análise e Refatoração**
+  - Análise estática de código
+  - Sugestões de refatoração
+  - Verificação de estilo e boas práticas
+  
+- **Gerenciamento de Projetos**
+  - Criação de estrutura de projetos
+  - Visualização de hierarquia de arquivos
+  - Gerenciamento de dependências
 
-1.  Certifique-se de que o serviço `ollama serve` está rodando em um terminal separado.
-2.  No diretório raiz do projeto, com o ambiente virtual (`venv`) ativado, execute:
-    ```bash
-    python agent.py
-    ```
-3.  Você verá um prompt como `(venv) macOS-AI>`. Digite seus comandos ou perguntas para o agente.
-    *   Exemplos:
-        *   `Liste os arquivos na pasta atual.`
-        *   `Qual o status do git?`
-        *   `Crie uma nova branch chamada feature/nova-funcionalidade.`
+### 3. **ChatAgent** - Assistente de Desenvolvimento
+- Respostas a perguntas técnicas
+- Explicação de conceitos de programação
+- Ajuda com documentação e boas práticas
+- Suporte a tarefas gerais de desenvolvimento
 
-## Estrutura do Projeto (Inicial)
+## Instalação
 
-*   `agent.py`: Script principal que contém a lógica do agente LangChain.
-*   `requirements.txt`: Lista das dependências Python.
-*   `.gitignore`: Especifica arquivos e diretórios a serem ignorados pelo Git.
-*   `venv/`: Diretório do ambiente virtual Python (ignorado pelo Git).
-*   `README.md`: Este arquivo.
+```bash
+# Clone o repositório
+git clone <repository-url>
+cd tcc
 
-## Próximos Passos e Funcionalidades Planejadas
+# Execute o instalador
+./install.sh
 
-*   Melhorar a interpretação de comandos complexos.
-*   Adicionar mais ferramentas específicas para Git (commits, merges, etc.).
-*   Integrar com outras ferramentas de linha de comando.
-*   Permitir configuração de um alias no terminal para acesso rápido. 
+# O comando 'gta' estará disponível globalmente
+```
+
+## Uso
+
+### Modo Interativo
+```bash
+gta
+```
+
+### Comando Único
+```bash
+gta "criar arquivo calculator.py com funções matemáticas"
+gta "gerar testes para calculator.py"
+gta "commit com mensagem descritiva"
+```
+
+## Exemplos de Comandos
+
+### Operações Git
+```bash
+# Status do repositório
+git status
+
+# Criar commit inteligente
+commit com mensagem descritiva
+
+# Adicionar tudo e commitar
+adicionar tudo e commitar
+```
+
+### Criação de Arquivos
+```bash
+# Criar arquivo Python
+criar arquivo utils.py com função de validação de email
+
+# Criar componente React
+criar arquivo Button.jsx componente React de botão
+
+# Criar classe Java
+criar arquivo User.java classe de usuário com getters e setters
+```
+
+
+
+### Comandos de Terminal
+
+O GTA suporta uma variedade de comandos de terminal nativos, incluindo:
+
+- Navegação e listagem: `ls`, `pwd`, `cd`, `mkdir`, `find`
+- Gerenciamento de arquivos: `cat`, `grep`, `head`, `tail`
+- Processos e sistema: `ps`, `top`, `htop`
+- Rede: `ping`, `ssh`, `curl`, `wget`
+
+Exemplos:
+```bash
+# Comandos diretos funcionam normalmente
+ls -la
+cd meudiretorio
+```
+
+### Comandos Específicos do GTA
+
+```bash
+# Operações Git
+gta "commit com mensagem descritiva"
+gta "criar branch feature/nova-funcionalidade"
+
+# Operações de Código
+gta "criar arquivo utils.py com funções úteis"
+gta "executar testes em test_meucodigo.py"
+
+# Análise de Código
+gta "analisar complexidade ciclomática"
+gta "sugerir melhorias de performance"
+
+# Gerenciamento de Projeto
+gta "mostrar estrutura do projeto"
+gta "criar estrutura de projeto Python"
+```
+ls -la
+pwd
+cat arquivo.txt
+```
+
+## Comandos Especiais
+
+- `help` - Mostra comandos disponíveis
+- `agents` - Lista agentes e suas capacidades
+- `exit` - Sai do assistente
+
+## Vantagens da Arquitetura Multi-Agente
+
+1. **Especialização**: Cada agente é otimizado para sua tarefa
+2. **Manutenibilidade**: Código modular e fácil de debugar
+3. **Extensibilidade**: Novos agentes podem ser adicionados facilmente
+4. **Confiabilidade**: Sanitização automática de respostas do LLM
+5. **Performance**: Apenas o agente necessário é ativado
+
+## Requisitos
+
+- Python 3.8+
+- Ollama com modelo qwen3:14b
+- Git instalado
+
+## Contribuindo
+
+Para adicionar um novo agente:
+
+1. Crie um arquivo em `agents/`
+2. Estenda a classe `BaseAgent`
+3. Implemente `can_handle()` e `process()`
+4. Adicione ao orquestrador
+
+## Estrutura do Projeto
+
+```
+tcc/
+├── agents/
+│   ├── __init__.py
+│   ├── base_agent.py      # Classe base com sanitização
+│   ├── git_agent.py       # Operações Git
+│   ├── code_agent.py      # Criação/edição de código
+│   └── orchestrator.py    # Roteador de requisições
+├── main.py                # Entry point
+├── llm_backend.py         # Configuração do LLM
+├── install.sh             # Instalador
+├── gta                    # Script global
+└── README.md              # Este arquivo
+```
+
+## Troubleshooting
+
+### Erro: Modelo não encontrado
+Certifique-se de que o Ollama está rodando e o modelo está instalado:
+```bash
+ollama pull qwen3:14b
+```
+
+### Comando não reconhecido
+Use `help` para ver comandos disponíveis ou seja mais específico na requisição.
+
+## Licença
+
+MIT
+
+## Créditos
+
+Desenvolvido com arquitetura multi-agente para máxima eficiência e manutenibilidade. 
