@@ -173,62 +173,37 @@ Diretrizes:
                 "error": str(e)
             }
     
-    def _extract_filename(self, request: str) -> Optional[str]:
-        """Gera um nome de arquivo semântico baseado na solicitação"""
-        # Tenta extrair um nome de arquivo explícito
-        explicit_match = re.search(
-            r'(?:arquivo|file|chamado|named|nome|criar|create|new|novo)[: ]+([a-zA-Z0-9_\-\.]+)',
-            request,
-            re.IGNORECASE
-        )
+    def _extract_filename(self, request: str) -> str:
+        """Gera um nome de arquivo baseado na solicitação"""
+        # Padrão para capturar o nome do arquivo após 'chamado' ou 'arquivo' até o final da linha ou próximo marcador
+        patterns = [
+            # Padrão para 'arquivo chamado X' ou 'arquivo X'
+            r'(?:arquivo|file)[\s]+(?:chamado[\s]+)?["\']?([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+)["\']?',
+            # Padrão para 'criar arquivo X' ou 'novo arquivo X'
+            r'(?:criar|create|new|novo)[\s]+(?:arquivo|file)[\s]+["\']?([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+)["\']?',
+            # Padrão para qualquer nome de arquivo com extensão
+            r'([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+)'
+        ]
         
-        if explicit_match:
-            filename = explicit_match.group(1).strip()
-            # Garante que tem uma extensão
-            if '.' not in filename:
-                # Tenta encontrar uma extensão baseada na linguagem
-                for lang, ext in self.lang_extensions.items():
-                    if lang in request.lower():
-                        return f"{filename}.{ext}"
-                return f"{filename}.txt"
-            return filename
+        for pattern in patterns:
+            match = re.search(pattern, request, re.IGNORECASE)
+            if match:
+                filename = match.group(1).strip()
+                # Remove caracteres inválidos
+                filename = re.sub(r'[^a-zA-Z0-9_\-\.]', '', filename)
+                if filename:
+                    return filename
         
-        # Extrai palavras significativas da solicitação
-        words = re.findall(r'\b[a-z]{3,}\b', request.lower())
-        
-        # Remove palavras comuns
-        stopwords = {
-            'the', 'and', 'for', 'with', 'that', 'this', 'from', 'have', 'which',
-            'criar', 'crie', 'novo', 'arquivo', 'file', 'code', 'código',
-            'uma', 'um', 'para', 'com', 'sem', 'sobre', 'como', 'quero', 'preciso',
-            'create', 'make', 'new', 'function', 'class', 'test', 'teste'
-        }
-        words = [w for w in words if w not in stopwords]
-        
-        # Se tivermos palavras significativas, usamos para criar o nome
-        if words:
-            base_name = '_'.join(words[:3])  # Usa até 3 palavras
-            
-            # Encontra a extensão apropriada
-            extension = 'txt'  # padrão
-            
-            # Verifica menções a linguagens
-            for lang, ext in self.lang_extensions.items():
-                if lang in request.lower():
-                    extension = ext
-                    break
-                    
-            # Verifica tipos de arquivo comuns
-            if any(word in request.lower() for word in ['component', 'react', 'jsx']):
-                extension = 'jsx'
-            elif 'test' in request.lower() and extension == 'py':
-                base_name = f"test_{base_name}"
+        # Se não encontrou, verifica se há uma extensão mencionada
+        extension = 'txt'
+        for ext in ['html', 'css', 'js', 'py', 'java', 'rb', 'go', 'rs', 'php', 'ts', 'jsx', 'tsx']:
+            if f'.{ext}' in request.lower():
+                extension = ext
+                break
                 
-            return f"{base_name}.{extension}"
-            
-        # Fallback: usa timestamp
+        # Usa um nome baseado no timestamp
         timestamp = str(int(time.time()))[-6:]
-        return f"arquivo_{timestamp}.txt"
+        return f"arquivo_{timestamp}.{extension}"
     
     def _generate_code_content(self, request: str, filename: str) -> str:
         """Generate code content based on request"""
