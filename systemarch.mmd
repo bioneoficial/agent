@@ -1,0 +1,22 @@
+flowchart LR;
+    subgraph OrquestraAI [OrquestraAI - Multi-Agent]
+        direction TB;
+        Orchestrator["Orchestrator<br/>(Central Coordinator)"];
+        GitAgent["GitAgent<br/>(Git Operations)"];
+        CodeAgent["CodeAgent<br/>(Code Handling)"];
+        ChatAgent["ChatAgent<br/>(Conversational Assistance)"];
+        Orchestrator --> GitAgent;
+        Orchestrator --> CodeAgent;
+        Orchestrator --> ChatAgent;
+    end;
+    User["Developer (User)"] --> Orchestrator;
+    subgraph Environment
+        direction TB;
+        LLM["Language Model (LLM)<br/>Ex: Qwen-14B via LangChain"];
+        System["Local System<br/>(Git, Files, etc.)"];
+    end;
+    GitAgent -. uses .-> LLM;
+    CodeAgent -. uses .-> LLM;
+    ChatAgent -. uses .-> LLM;
+    GitAgent -->|operations| System;
+    CodeAgent -->|operations| System;

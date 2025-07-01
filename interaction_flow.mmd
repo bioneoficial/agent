@@ -1,0 +1,25 @@
+sequenceDiagram
+    participant DEV as Developer (User)
+    participant ORQ as Orchestrator
+    participant GIT as GitAgent
+    participant CODE as CodeAgent
+    participant CHAT as ChatAgent
+
+    %% Scenario 1: Code Generation
+    DEV->>ORQ: "Create a file calculator.py with a sum function"
+    ORQ-->>CODE: Forwards request for file creation
+    CODE-->>ORQ: Returns generated Python code (e.g., sum function)
+    ORQ-->>DEV: Confirms creation of file calculator.py
+
+    %% Scenario 2: Git Version Control
+    DEV->>ORQ: "Commit with the message 'initial version of sum function'"
+    ORQ-->>GIT: Forwards commit request
+    GIT-->>GIT: Generates semantic commit message (Conventional Commit)
+    GIT-->>ORQ: Returns confirmation of completed commit
+    ORQ-->>DEV: Informs user of successful commit with generated message
+
+    %% Scenario 3: Conversational Query
+    DEV->>ORQ: "What is a semantic commit?"
+    ORQ-->>CHAT: Forwards technical query for response
+    CHAT-->>ORQ: Returns explanatory answer about semantic commits
+    ORQ-->>DEV: Provides natural language response to the user

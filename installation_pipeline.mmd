@@ -1,0 +1,11 @@
+flowchart TD;
+    subgraph Installation and Usage
+        A[Run installation script: install.sh] --> B[Creates local alias: 'gta']
+        B --> C[Alias available globally in terminal]
+    end
+
+    subgraph Example GTA Usage
+        C --> D["gta 'commit message'"]
+        C --> E["gta 'create file calculator.py'"]
+        C --> F["gta 'what is semantic commit?'"]
+    end

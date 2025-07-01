@@ -1,0 +1,13 @@
+graph TD;
+    OrquestraAI[OrquestraAI Project Root]
+    OrquestraAI --> agents[agents/]
+    agents --> GitAgent["git_agent.py"]
+    agents --> CodeAgent["code_agent.py"]
+    agents --> ChatAgent["chat_agent.py"]
+    OrquestraAI --> orchestrator["orchestrator.py"]
+    OrquestraAI --> main["main.py"]
+    OrquestraAI --> install["install.sh"]
+    OrquestraAI --> alias_script["gta"]
+    OrquestraAI --> requirements["requirements.txt"]
+    OrquestraAI --> config["config.py"]
+    OrquestraAI --> readme["README.md"]
