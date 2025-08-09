@@ -1,0 +1,3 @@
+# Install core + all provider dependencies
+-r requirements.txt
+-r requirements-providers.txt

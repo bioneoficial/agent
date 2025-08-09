@@ -1,0 +1,14 @@
+# Provider dependencies (online LLMs)
+# Install these only if you plan to use online providers.
+
+# LangChain provider integrations (pull in respective SDKs)
+langchain-openai>=0.1.0
+langchain-anthropic>=0.1.0
+langchain-google-genai>=0.1.0
+langchain-cohere>=0.1.0
+
+# Explicit provider SDKs (usually installed transitively, kept here for reliability)
+openai>=1.30.0
+anthropic>=0.30.0
+google-generativeai>=0.6.0
+cohere>=5.5.0

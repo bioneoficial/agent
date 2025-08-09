@@ -6,6 +6,16 @@
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Load environment variables from .env if present
+DOTENV_PATH="$SCRIPT_DIR/.env"
+if [ -f "$DOTENV_PATH" ]; then
+    # export variables defined in .env
+    set -a
+    # shellcheck disable=SC1090
+    source "$DOTENV_PATH"
+    set +a
+fi
+
 # Path to the main Python script
 MAIN_SCRIPT="$SCRIPT_DIR/main.py"
 

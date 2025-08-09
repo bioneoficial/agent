@@ -34,7 +34,22 @@ LLM_MODEL=gpt-4
 OPENAI_API_KEY=sua-chave-aqui
 ```
 
-### 3. Instale as dependências do provedor
+### 3. Instale as dependências
+
+Opção B (recomendado) — arquivos separados:
+
+```bash
+# Núcleo (core)
+pip install -r requirements.txt
+
+# Provedores online
+pip install -r requirements-providers.txt
+
+# Tudo (núcleo + provedores)
+pip install -r requirements-all.txt
+```
+
+Alternativa — instalar por provedor (apenas se/quando for usar):
 
 ```bash
 # Para OpenAI

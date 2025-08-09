@@ -485,11 +485,12 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
         api_related = False
         ui_related = False
         test_related = False
+        contains_test_files = False
+        test_strong = False
         performance_related = False
         refactor_related = False
-        file_languages = {}  # Armazena a linguagem de cada arquivo modificado
+        file_languages = {}
         
-        # Security-related patterns (expandidos)
         security_patterns = [
             r'password', r'auth', r'token', r'crypt', r'hash', r'secret', 
             r'security', r'vulnerability', r'exploit', r'permission', r'login',
@@ -531,14 +532,11 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
             r'O\([n0-9]+\)', r'complexidade', r'complexity', r'overhead'
         ]
         
-        # Test-related patterns (expandidos)
+        # Test-related patterns (restritos para evitar falsos positivos)
         test_patterns = [
-            r'test', r'spec', r'assert', r'mock', r'stub', r'fixture', r'expect',
-            r'should', r'describe', r'it\s*\(', r'suite', r'scenario', r'given',
-            r'when', r'then', r'verify', r'validate', r'unit', r'integration',
-            r'e2e', r'end-to-end', r'smoke', r'regression', r'performance',
-            r'load', r'stress', r'coverage', r'jest', r'pytest', r'unittest',
-            r'testcase', r'beforeeach', r'aftereach', r'setup', r'teardown'
+            r'\bassert\b', r'\bjest\b', r'\bpytest\b', r'\bunittest\b', r'\btestcase\b',
+            r'describe\s*\(', r'it\s*\(', r'expect\s*\(', r'beforeeach', r'aftereach', r'setup', r'teardown',
+            r'\bunit\b', r'\bintegration\b', r'\be2e\b', r'end-to-end', r'\bcoverage\b'
         ]
         
         # Padrões para refatoração
@@ -549,6 +547,13 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
             r'unused', r'duplica', r'redundant', r'legacy'
         ]
         
+        # Detect if there are explicit test files among changed files
+        contains_test_files = any(
+            p.startswith(('test/', 'tests/', 'spec/', '__tests__/')) or
+            '/test/' in p or '/tests/' in p or '/spec/' in p or '/__tests__/' in p
+            for p in changed_files
+        )
+
         # Limit files to analyze to avoid excessive prompt size
         for file_path in changed_files[:5]:  # Only analyze first 5 files
             try:
@@ -643,10 +648,17 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
                     ui_related = any(re.search(pattern, content_text, re.IGNORECASE) 
                                     for pattern in ui_patterns)
                 
-                # Check for test-related changes
+                # Check for test-related changes (restritos)
                 if not test_related:
                     test_related = any(re.search(pattern, content_text, re.IGNORECASE) 
-                                      for pattern in test_patterns)
+                                       for pattern in test_patterns)
+
+                # Strong test signal: common testing frameworks or APIs
+                if not test_strong:
+                    if (re.search(r'\b(pytest|unittest|jest)\b', content_text, re.IGNORECASE) or
+                        re.search(r'\bassert\b', content_text) or
+                        re.search(r'describe\s*\(|it\s*\(|expect\s*\(', content_text)):
+                        test_strong = True
                 
                 # Check for performance-related changes
                 if not performance_related:
@@ -712,6 +724,9 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
             except subprocess.CalledProcessError:
                 pass
         
+        # Consolidate strong signal if test files are present
+        test_strong = test_strong or contains_test_files
+
         return {
             "diff_samples": diff_samples,
             "imports_added": imports_added,
@@ -724,6 +739,8 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
             "api_related": api_related,
             "ui_related": ui_related,
             "test_related": test_related,
+            "contains_test_files": contains_test_files,
+            "test_strong": test_strong,
             "performance_related": performance_related,
             "refactor_related": refactor_related,
             "file_languages": file_languages
@@ -1023,8 +1040,10 @@ Retorne APENAS a mensagem de commit no formato: type(scope): description
         if diff_analysis.get("docstring_changes") and not diff_analysis.get("functions_added") and not diff_analysis.get("classes_added"):
             refined_type = "docs"
             
-        # Mudanças relacionadas a testes
-        elif diff_analysis.get("test_related"):
+        # Mudanças relacionadas a testes (apenas com forte evidência e sem novas features)
+        elif (diff_analysis.get("test_strong") or diff_analysis.get("contains_test_files")) and not (
+            diff_analysis.get("functions_added") or diff_analysis.get("classes_added")
+        ):
             refined_type = "test"
             
         # Alterações de segurança
@@ -1191,7 +1210,7 @@ Retorne APENAS a mensagem de commit no formato: type(scope): description
                 inferred_type = "docs"
             elif re.search(r'\b(refactor|clean|reorganize|simplify|restructure|rewrite)\b', msg_lower):
                 inferred_type = "refactor"
-            elif re.search(r'\b(test|spec|assert|verify|validation)\b', msg_lower):
+            elif re.search(r'\b(assert|pytest|unittest|jest|testcase)\b', msg_lower):
                 inferred_type = "test"
             elif re.search(r'\b(style|format|indent|lint|prettier|eslint)\b', msg_lower):
                 inferred_type = "style"
