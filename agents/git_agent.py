@@ -801,7 +801,9 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
         # Preparar exemplos de código mais relevantes para o contexto
         code_samples = self._prepare_relevant_code_samples(diff_analysis)
         
-        # Prepare prompt for LLM with rich context and structure
+        # Generate a diff summary to provide a high‑level overview of insertions/deletions per file
+        diff_summary = self._generate_diff_summary()
+        # Prepare prompt for LLM with rich context and structure, including diff summary if available
         prompt = f"""Generate a single semantic commit message for these changes following the Conventional Commits specification.
 
 Summary of Changes:
@@ -817,6 +819,9 @@ Changed Files:
 
 Code Analysis:
 {self._format_diff_analysis_for_prompt(diff_analysis)}
+
+Diff Summary:
+{diff_summary if diff_summary else 'Nenhuma diferença detectada.'}
 
 Relevant Code Changes:
 {code_samples}
@@ -1090,10 +1095,46 @@ Retorne APENAS a mensagem de commit no formato: type(scope): description
             refined_type = "chore"
             
         return refined_type, refined_scope
+    
+    def _generate_diff_summary(self) -> str:
+        """Create a concise diff summary from staged changes using git diff --numstat.
+
+        Returns a human‑readable summary listing each changed file along with the number
+        of insertions and deletions. If the diff cannot be obtained, returns an empty string.
+        """
+        result = self._safe_git_command("diff --numstat --cached")
+        if not result.get("success") or not result.get("output"):
+            return ""
+        summary_lines: List[str] = []
+        for line in result["output"].splitlines():
+            parts = line.strip().split()
+            # Expect three parts: insertions, deletions and filename.
+            if len(parts) < 3:
+                continue
+            insertions_str, deletions_str, *file_path_parts = parts
+            file_path = " ".join(file_path_parts)
+            # Convert insertions and deletions to integers; non‑numeric values indicate binary diffs
+            try:
+                insertions = int(insertions_str)
+            except (ValueError, TypeError):
+                insertions = 0
+            try:
+                deletions = int(deletions_str)
+            except (ValueError, TypeError):
+                deletions = 0
+            changes_desc: List[str] = []
+            if insertions > 0:
+                changes_desc.append(f"{insertions} inserções")
+            if deletions > 0:
+                changes_desc.append(f"{deletions} deleções")
+            if not changes_desc:
+                changes_desc.append("alterações")
+            summary_lines.append(f"- {os.path.basename(file_path)}: {', '.join(changes_desc)}")
+        return "\n".join(summary_lines)
         
     def _fix_commit_format(self, message: str) -> str:
         """Try to fix common issues with commit message format
-        
+            
         This function takes a commit message and attempts to format it according to
         Conventional Commits standard if it doesn't already conform.
         """
