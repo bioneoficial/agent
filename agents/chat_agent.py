@@ -17,28 +17,35 @@ Nunca assuma que uma pergunta é um comando para criar ou modificar arquivos."""
     
     def can_handle(self, request: str) -> bool:
         """Verifica se este agente pode lidar com a solicitação"""
-        request_lower = request.lower()
+        req = (request or "").strip().lower()
+        if not req:
+            return False
         
-        # Padrões que indicam perguntas ou solicitações de informação
-        question_patterns = [
-            # Padrões de perguntas explícitas
-            r'^como\s+(?:eu|)\s*', r'^o que\s+(?:é|são|)\s*', r'^qual\s+(?:é|são|)\s*',
-            r'^quais\s+(?:são|)\s*', r'^por que\s+', r'^quando\s+', r'^onde\s+',
-            r'^me\s+(?:explique|diga|informe|ajude)\s+', r'^explique\s+',
-            
-            # Terminações com "?"
-            r'\?$',
-            
-            # Solicitações de informação
-            r'^(?:preciso|quero|gostaria)\s+(?:de\s+)?(?:saber|entender|compreender)',
-            r'^(?:me\s+)?(?:mostre|indique|informe)\s+como',
-            
-            # Comandos específicos que pedem informação
-            r'^(?:descreva|liste|enumere|detalhe)\s+'
+        # Qualquer entrada terminando com '?' é tratada como pergunta/informação
+        if req.endswith('?'):
+            return True
+        
+        # Detectores de pergunta (PT e EN)
+        question_starters = [
+            # PT
+            r'^(como(\s+eu)?\s+)', r'^(o que(\s+é|são)?\s+)', r'^(qual(\s+é|são)?\s+)',
+            r'^(quais(\s+são)?\s+)', r'^(por que\s+)', r'^(quando\s+)', r'^(onde\s+)',
+            r'^(me\s+(explique|diga|informe|ajude)\s+)', r'^(explique\s+)',
+            # EN
+            r'^(what\s+)', r'^(who\s+)', r'^(why\s+)', r'^(when\s+)', r'^(where\s+)', r'^(how\s+)',
+            r'^(tell me\s+)', r'^(show me\s+)', r'^(list|describe|explain)\s+'
         ]
+        for pattern in question_starters:
+            if re.search(pattern, req):
+                return True
         
-        # Verificar se a solicitação parece ser uma pergunta ou pedido de informação
-        return any(re.match(pattern, request_lower) for pattern in question_patterns)
+        # Heurísticas adicionais
+        if any(phrase in req for phrase in [
+            'o que é', 'o que sao', 'o que são', 'como funciona',
+            'what is', 'how to', 'how do i', 'explain', 'describe']):
+            return True
+        
+        return False
     
     def process(self, request: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Processa a solicitação de informação e retorna uma resposta usando o LLM"""
@@ -74,7 +81,7 @@ Responda em português, com explicações claras e exemplos quando relevante.
                 
             if 'test' in context_info.get('topic', ''):
                 prompt += "\nIncluir informações sobre como executar testes, comandos relevantes e opções úteis para o contexto específico.\n"
-                
+        
         # Gerar resposta com o LLM
         try:
             response = self.invoke_llm(prompt)

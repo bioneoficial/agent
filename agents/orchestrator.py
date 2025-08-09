@@ -41,6 +41,31 @@ class Orchestrator:
         if self._is_terminal_command(request):
             return self._execute_terminal_command(request)
         
+        # Route obvious questions to ChatAgent first
+        t = (request or "").strip().lower()
+        if t.endswith('?') or any(t.startswith(s) for s in [
+            # PT
+            'como ', 'como eu ', 'o que', 'qual', 'quais', 'por que', 'quando', 'onde',
+            'me explique', 'me diga', 'me informe', 'me ajude', 'explique ',
+            # EN
+            'what ', 'who ', 'why ', 'when ', 'where ', 'how ',
+            'tell me ', 'show me ', 'list ', 'describe ', 'explain '
+        ]):
+            for agent in self.agents:
+                if getattr(agent, 'name', '') == 'ChatAgent':
+                    try:
+                        if agent.can_handle(request):
+                            result = agent.process(request, context)
+                            result['agent'] = agent.name
+                            return result
+                    except Exception as e:
+                        return {
+                            "success": False,
+                            "output": f"Error in {agent.name}: {str(e)}",
+                            "agent": agent.name,
+                            "error": str(e)
+                        }
+        
         # Find the appropriate agent
         for agent in self.agents:
             if agent.can_handle(request):
@@ -124,7 +149,29 @@ class Orchestrator:
     
     def _handle_unclear_request(self, request: str) -> Dict[str, Any]:
         """Handle requests that don't clearly match any agent by focusing on Git intent detection"""
-        request_lower = request.lower()
+        # If it looks like a question, delegate to ChatAgent
+        t = (request or "").strip().lower()
+        if t.endswith('?') or any(t.startswith(s) for s in [
+            'como ', 'como eu ', 'o que', 'qual', 'quais', 'por que', 'quando', 'onde',
+            'me explique', 'me diga', 'me informe', 'me ajude', 'explique ',
+            'what ', 'who ', 'why ', 'when ', 'where ', 'how ',
+            'tell me ', 'show me ', 'list ', 'describe ', 'explain '
+        ]):
+            for agent in self.agents:
+                if getattr(agent, 'name', '') == 'ChatAgent':
+                    try:
+                        if agent.can_handle(request):
+                            result = agent.process(request, None)
+                            result['agent'] = agent.name
+                            return result
+                    except Exception as e:
+                        return {
+                            "success": False,
+                            "output": f"Error in {agent.name}: {str(e)}",
+                            "agent": agent.name,
+                            "error": str(e)
+                        }
+        request_lower = t
         
         # Check for Git-related keywords with more comprehensive patterns
         git_keywords = [
