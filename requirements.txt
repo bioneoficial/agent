@@ -1,3 +1,13 @@
+# Core dependencies
 langchain_ollama>=0.0.1
 langchain-core>=0.1.0
+langchain-community>=0.0.1
 regex>=2023.0.0
+python-dotenv>=1.0.0
+
+# Optional provider dependencies (install as needed)
+# OpenAI: pip install langchain-openai
+# Anthropic: pip install langchain-anthropic
+# Google: pip install langchain-google-genai
+# Cohere: pip install langchain-cohere
+# Azure: pip install langchain-openai  # Same as OpenAI

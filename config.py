@@ -1,12 +1,21 @@
 """
 Sistema de configuração para o GTA (Git Terminal Assistant)
 Permite configurar parâmetros como modelos LLM para cada agente
+
+Agora suporta múltiplos provedores de LLM via variáveis de ambiente ou .env:
+- OpenAI, Anthropic, Google, Cohere, Azure OpenAI, Ollama
+- Configuração por agente ou global
+- Fallback automático se o provedor primário falhar
 """
 
 import os
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional
+from dotenv import load_dotenv
+
+# Carrega variáveis de ambiente do arquivo .env
+load_dotenv()
 
 # Caminho padrão para o arquivo de configuração
 CONFIG_PATH = os.environ.get('GTA_CONFIG_PATH', Path.home() / '.gta_config.json')
