@@ -1040,9 +1040,10 @@ Retorne APENAS a mensagem de commit no formato: type(scope): description
         if diff_analysis.get("docstring_changes") and not diff_analysis.get("functions_added") and not diff_analysis.get("classes_added"):
             refined_type = "docs"
             
-        # Mudanças relacionadas a testes (apenas com forte evidência e sem novas features)
+        # Mudanças relacionadas a testes (apenas com forte evidência, sem novas features, e não refatoração)
         elif (diff_analysis.get("test_strong") or diff_analysis.get("contains_test_files")) and not (
-            diff_analysis.get("functions_added") or diff_analysis.get("classes_added")
+            diff_analysis.get("functions_added") or diff_analysis.get("classes_added") or 
+            diff_analysis.get("refactor_related")
         ):
             refined_type = "test"
             
@@ -1058,9 +1059,12 @@ Retorne APENAS a mensagem de commit no formato: type(scope): description
         elif diff_analysis.get("performance_related"):
             refined_type = "perf"
             
-        # Refatoração de código
-        elif diff_analysis.get("refactor_related") and not (diff_analysis.get("functions_added") or diff_analysis.get("classes_added")):
-            refined_type = "refactor"
+        # Refatoração de código (prioridade alta para evitar classificação incorreta como test)
+        elif diff_analysis.get("refactor_related"):
+            if diff_analysis.get("functions_added") or diff_analysis.get("classes_added"):
+                refined_type = "feat"  # Refatoração com novas funcionalidades = feature
+            else:
+                refined_type = "refactor"
             
         # Novas funções ou classes (provavelmente novas features)
         elif diff_analysis.get("functions_added") or diff_analysis.get("classes_added"):
