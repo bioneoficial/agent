@@ -11,6 +11,7 @@ import argparse
 from typing import Dict, Any, Optional
 from agents import Orchestrator
 import time
+import os
 
 # Global orchestrator instance
 orchestrator: Optional[Orchestrator] = None
@@ -23,6 +24,18 @@ def print_result(result: Dict[str, Any]):
         # Show additional info if available
         if 'agent' in result:
             print(f"  [Handled by: {result['agent']}]")
+        # Optional: show routing diagnostics when enabled
+        if os.getenv('GTA_ROUTER_DEBUG') in ('1', 'true', 'True', 'YES', 'yes') and 'routing' in result:
+            routing = result.get('routing', {})
+            route = routing.get('route', 'unknown')
+            conf = routing.get('confidence')
+            reason = routing.get('reason', '')
+            if isinstance(conf, (int, float)):
+                conf_str = f"{conf:.2f}"
+            else:
+                conf_str = str(conf)
+            extra = f" – {reason}" if reason else ""
+            print(f"  [Routing: {route} @{conf_str}{extra}]")
         if 'filename' in result:
             print(f"  [File: {result['filename']}]")
         if 'message' in result:
@@ -43,6 +56,12 @@ def interactive_mode():
     
     # Initialize orchestrator
     orchestrator = Orchestrator()
+    # Optional: show router configuration when debug is enabled
+    if os.getenv('GTA_ROUTER_DEBUG') in ('1', 'true', 'True', 'YES', 'yes'):
+        try:
+            print(f"[Router] strategy={orchestrator.router_strategy} threshold={getattr(orchestrator, 'router_threshold', 'n/a')}")
+        except Exception:
+            pass
     
     while True:
         try:
