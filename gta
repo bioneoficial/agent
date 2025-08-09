@@ -3,8 +3,18 @@
 # Git Terminal Assistant (GTA) - Global Command
 # This script allows calling the assistant from anywhere in the system
 
-# Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve this script's real path even if called via a symlink
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SCRIPT_PATH" ]; do
+  LINK_TARGET="$(readlink "$SCRIPT_PATH")"
+  if [[ "$LINK_TARGET" == /* ]]; then
+    SCRIPT_PATH="$LINK_TARGET"
+  else
+    SCRIPT_DIR_TMP="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$SCRIPT_DIR_TMP/$LINK_TARGET"
+  fi
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 
 # Load environment variables from .env if present
 DOTENV_PATH="$SCRIPT_DIR/.env"
@@ -14,6 +24,8 @@ if [ -f "$DOTENV_PATH" ]; then
     # shellcheck disable=SC1090
     source "$DOTENV_PATH"
     set +a
+    echo "Loaded environment from $DOTENV_PATH"
+    echo "Using provider: $LLM_PROVIDER with model: $LLM_MODEL"
 fi
 
 # Path to the main Python script
