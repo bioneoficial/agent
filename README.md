@@ -88,22 +88,98 @@ O sistema utiliza uma arquitetura de agentes especializados, otimizada para efic
 
 ## Instalação
 
+Esta seção cobre Linux, macOS e Windows. Veja também `docs/LLM_PROVIDERS.md` para configurar provedores LLM (OpenAI, Anthropic, Google, Cohere, Azure, Ollama).
+
+1) Clonar o repositório
+
 ```bash
-# Clone o repositório
 git clone <repository-url>
-cd tcc
+cd tcc  # ou o diretório raiz do projeto
+```
 
-# Execute o instalador
+2) Criar ambiente virtual (recomendado)
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # macOS/Linux
+# No Windows (PowerShell):
+# .venv\Scripts\Activate.ps1
+```
+
+3) Instalar dependências
+
+Opção B (recomendada) — requisitos divididos:
+
+```bash
+pip install -r requirements.txt                  # núcleo
+pip install -r requirements-providers.txt        # provedores online (se necessário)
+# ou tudo de uma vez:
+pip install -r requirements-all.txt
+```
+
+4) Configurar LLM e Router
+
+```bash
+cp .env.example .env
+# Edite .env e defina LLM_PROVIDER/LLM_MODEL e chaves de API, se aplicável
+# Para habilitar roteamento por LLM:
+# GTA_ROUTER=llm
+# GTA_ROUTER_THRESHOLD=0.7
+```
+
+5) Instalar o comando global (macOS/Linux)
+
+```bash
 ./install.sh
+# Recarregue o shell (ex.: source ~/.zshrc) e use: gta -i
+```
 
-# O comando 'gta' estará disponível globalmente
+5b) Windows (PowerShell)
+
+Você pode executar direto do repositório:
+
+```powershell
+./gta.ps1 -i
+```
+
+Se preferir o cmd.exe, você pode usar também o wrapper `gta.cmd`:
+
+```bat
+gta.cmd -i
+```
+
+Observação sobre Execution Policy (Windows):
+
+Se você receber um erro como "running scripts is disabled on this system":
+
+```powershell
+# Permitir scripts para o usuário atual (recomendado)
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+
+# OU apenas desbloquear este arquivo específico
+Unblock-File .\gta.ps1
+```
+
+Em ambientes corporativos, a política pode ser gerenciada pelo TI. Caso necessário, execute o PowerShell como Administrador ou consulte sua equipe de TI.
+
+Para tornar global, adicione este atalho ao seu $PROFILE:
+
+```powershell
+# Abra o perfil
+if (!(Test-Path $PROFILE)) { New-Item -Type File -Path $PROFILE -Force | Out-Null }
+notepad $PROFILE
+
+# Adicione esta função ao final do arquivo de perfil e ajuste o caminho do script
+function gta { & "C:\caminho\para\o\projeto\gta.ps1" @args }
 ```
 
 ## Uso
 
 ### Modo Interativo
 ```bash
-gta
+gta -i               # macOS/Linux após install.sh
+# Windows: se sem atalho global, use:
+# .\gta.ps1 -i  ou  .\gta.cmd -i
 ```
 
 ### Comando Único
@@ -111,50 +187,6 @@ gta
 gta "criar arquivo calculator.py com funções matemáticas"
 gta "gerar testes para calculator.py"
 gta "commit com mensagem descritiva"
-```
-
-## Exemplos de Comandos
-
-### Operações Git
-```bash
-# Status do repositório
-git status
-
-# Criar commit inteligente
-commit com mensagem descritiva
-
-# Adicionar tudo e commitar
-adicionar tudo e commitar
-```
-
-### Criação de Arquivos
-```bash
-# Criar arquivo Python
-criar arquivo utils.py com função de validação de email
-
-# Criar componente React
-criar arquivo Button.jsx componente React de botão
-
-# Criar classe Java
-criar arquivo User.java classe de usuário com getters e setters
-```
-
-
-
-### Comandos de Terminal
-
-O GTA suporta uma variedade de comandos de terminal nativos, incluindo:
-
-- Navegação e listagem: `ls`, `pwd`, `cd`, `mkdir`, `find`
-- Gerenciamento de arquivos: `cat`, `grep`, `head`, `tail`
-- Processos e sistema: `ps`, `top`, `htop`
-- Rede: `ping`, `ssh`, `curl`, `wget`
-
-Exemplos:
-```bash
-# Comandos diretos funcionam normalmente
-ls -la
-cd meudiretorio
 ```
 
 ### Comandos Específicos do GTA
@@ -175,11 +207,24 @@ gta "sugerir melhorias de performance"
 # Gerenciamento de Projeto
 gta "mostrar estrutura do projeto"
 gta "criar estrutura de projeto Python"
-```
-ls -la
-pwd
-cat arquivo.txt
-```
+
+### Comandos de Terminal (nativos)
+ 
+ O GTA executa diretamente diversos comandos de terminal comuns antes de encaminhar aos agentes. A disponibilidade pode variar por sistema operacional.
+ 
+ - Navegação e listagem: `ls`, `pwd`, `cd`, `mkdir`, `find`
+ - Terminal e sessão: `clear`, `history`, `alias`
+ - Processos e sistema: `ps`, `top`, `htop`
+ - Rede: `ping`, `ssh`, `curl`, `wget`
+ - Arquivos e arquivamento: `cat`, `grep`, `head`, `tail`, `tar`, `zip`, `unzip`
+ - Informações: `man`, `date`, `whoami`, `uname`, `df`, `du`
+ 
+ Exemplos:
+ ```bash
+ ls -la
+ pwd
+ clear
+ ```
 
 ## Comandos Especiais
 
@@ -197,9 +242,12 @@ cat arquivo.txt
 
 ## Requisitos
 
-- Python 3.8+
-- Ollama com modelo qwen3:14b
+- Python 3.8+ (recomendado 3.10+)
 - Git instalado
+- Provedor LLM:
+  - Ollama (opcional) com modelo local, ex.: `llama3.1:8b`
+  - ou provedores online (OpenAI/Anthropic/Google/Cohere/Azure) com chave de API
+- Windows: PowerShell 5+ (recomendado PowerShell 7+)
 
 ## Contribuindo
 
@@ -222,26 +270,44 @@ tcc/
 │   └── orchestrator.py    # Roteador de requisições
 ├── main.py                # Entry point
 ├── llm_backend.py         # Configuração do LLM
-├── install.sh             # Instalador
-├── gta                    # Script global
+├── llm_providers.py       # Fábrica de provedores LLM
+├── install.sh             # Instalador (macOS/Linux)
+├── gta                    # Script global (macOS/Linux)
+├── gta.ps1                # Script PowerShell (Windows)
+├── gta.cmd                # Script cmd.exe (Windows)
+├── docs/
+│   └── LLM_PROVIDERS.md   # Guia de provedores LLM e exemplos
 └── README.md              # Este arquivo
 ```
 
 ## Troubleshooting
 
-### Erro: Modelo não encontrado
-Certifique-se de que o Ollama está rodando e o modelo está instalado:
-```bash
-ollama pull qwen3:14b
-```
+### .env não é carregado
+- macOS/Linux: o script `gta` resolve o caminho real (symlink-safe) e carrega `./.env`. Verifique se o arquivo está no diretório raiz do projeto.
+- Windows: `gta.ps1` carrega `.env` do diretório do script. Confirme o caminho do script usado no atalho.
 
-### Comando não reconhecido
-Use `help` para ver comandos disponíveis ou seja mais específico na requisição.
+### Provider não funciona ou volta para Ollama
+- Verifique se instalou as dependências do provedor (ex.: `pip install -r requirements-providers.txt`).
+- Confirme variáveis no `.env`: `LLM_PROVIDER`, `LLM_MODEL`, e chave `*_API_KEY` correspondente.
+- Remova poluição de ambiente (variáveis residuais do shell). Feche e reabra o terminal ou `unset` variáveis conflitantes.
+
+### Dependência ausente
+Mensagens como: `OpenAI provider requires: pip install langchain-openai` indicam falta de pacote. Instale e tente novamente.
+
+### Router LLM
+- Para habilitar: `GTA_ROUTER=llm` no `.env`.
+- Ajuste confiança: `GTA_ROUTER_THRESHOLD=0.7` (padrão).
+- Debug: `GTA_ROUTER_DEBUG=1` mostra estratégia e decisões de roteamento.
+
+### Ollama local
+Certifique-se de que o servidor está ativo e o modelo instalado:
+```bash
+ollama pull llama3.1:8b
+ollama serve
+```
 
 ## Licença
 
 MIT
-
-## Créditos
 
 Desenvolvido com arquitetura multi-agente para máxima eficiência e manutenibilidade. 
