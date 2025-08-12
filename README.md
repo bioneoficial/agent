@@ -208,23 +208,55 @@ gta "sugerir melhorias de performance"
 gta "mostrar estrutura do projeto"
 gta "criar estrutura de projeto Python"
 
+
+## Pipelines de Colaboração (multi-agente)
+
+Os pipelines permitem que múltiplos agentes cooperem em um fluxo único, compartilhando contexto (ex.: resultados de testes) para ações mais inteligentes.
+
+- commit_with_tests: executa testes via CodeAgent, gera mensagem de commit via GitAgent incluindo o resultado dos testes e, por padrão, só commita se os testes passarem.
+- message_with_tests: executa testes e gera somente a mensagem de commit (sem commitar).
+
+Exemplos:
+```bash
+gta "commit with tests"
+gta "message with tests"
+```
+
+Configuração:
+- Por padrão, commits são bloqueados quando há falhas nos testes.
+- Para permitir commit mesmo com falhas, ajuste a variável de ambiente GTA_COMMIT_REQUIRE_TESTS_PASS:
+
+macOS/Linux (bash/zsh):
+```bash
+export GTA_COMMIT_REQUIRE_TESTS_PASS=0
+```
+
+Windows PowerShell:
+```powershell
+$env:GTA_COMMIT_REQUIRE_TESTS_PASS="0"
+```
+
+Observações:
+- A detecção é baseada em palavras‑chave ("test/tests/teste", "commit/commitar", "message/mensagem/msg").
+- É necessário ter alterações staged para a geração de mensagem de commit.
+
 ### Comandos de Terminal (nativos)
- 
- O GTA executa diretamente diversos comandos de terminal comuns antes de encaminhar aos agentes. A disponibilidade pode variar por sistema operacional.
- 
- - Navegação e listagem: `ls`, `pwd`, `cd`, `mkdir`, `find`
- - Terminal e sessão: `clear`, `history`, `alias`
- - Processos e sistema: `ps`, `top`, `htop`
- - Rede: `ping`, `ssh`, `curl`, `wget`
- - Arquivos e arquivamento: `cat`, `grep`, `head`, `tail`, `tar`, `zip`, `unzip`
- - Informações: `man`, `date`, `whoami`, `uname`, `df`, `du`
- 
- Exemplos:
- ```bash
- ls -la
- pwd
- clear
- ```
+
+O GTA executa diretamente diversos comandos de terminal comuns antes de encaminhar aos agentes. A disponibilidade pode variar por sistema operacional.
+
+- Navegação e listagem: `ls`, `pwd`, `cd`, `mkdir`, `find`
+- Terminal e sessão: `clear`, `history`, `alias`
+- Processos e sistema: `ps`, `top`, `htop`
+- Rede: `ping`, `ssh`, `curl`, `wget`
+- Arquivos e arquivamento: `cat`, `grep`, `head`, `tail`, `tar`, `zip`, `unzip`
+- Informações: `man`, `date`, `whoami`, `uname`, `df`, `du`
+
+Exemplos:
+```bash
+ls -la
+pwd
+clear
+```
 
 ## Comandos Especiais
 

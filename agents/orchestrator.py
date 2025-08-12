@@ -77,6 +77,23 @@ class Orchestrator:
         if self._is_terminal_command(request):
             return self._execute_terminal_command(request)
         
+        # Detect and run collaboration pipelines before normal routing
+        pipeline = self._detect_pipeline(request)
+        if pipeline:
+            try:
+                result = self._run_pipeline(pipeline, request, context or {})
+                result['agent'] = 'Orchestrator'
+                result['pipeline'] = pipeline
+                return result
+            except Exception as e:
+                return {
+                    "success": False,
+                    "output": f"Pipeline '{pipeline}' failed: {str(e)}",
+                    "type": "pipeline_error",
+                    "pipeline": pipeline,
+                    "error": str(e)
+                }
+        
         # Use LLM or heuristic routing based on configuration
         if self.router_strategy == 'llm' and self.router_llm:
             routing_result = self._llm_route(request)
@@ -281,6 +298,182 @@ Examples:
         # No agent found
         return self._handle_unclear_request(request)
     
+    def _detect_pipeline(self, request: str) -> Optional[str]:
+        """Detect if the request should trigger a multi-agent pipeline"""
+        t = (request or '').strip().lower()
+        if not t:
+            return None
+        
+        # Common keywords
+        test_kw = any(w in t for w in ['test', 'tests', 'teste', 'pytest', 'unittest', 'jest'])
+        commit_kw = 'commit' in t or 'comitar' in t or 'commitar' in t
+        message_kw = any(w in t for w in ['message', 'mensagem', 'msg'])
+        
+        # Prefer message pipeline when user explicitly mentions message generation
+        if test_kw and message_kw and commit_kw:
+            return 'message_with_tests'
+        
+        if test_kw and commit_kw:
+            return 'commit_with_tests'
+        
+        # Allow explicit phrasing for message generation with tests
+        if test_kw and message_kw:
+            return 'message_with_tests'
+        
+        return None
+    
+    def _run_pipeline(self, name: str, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Run a named collaboration pipeline with shared context"""
+        if name == 'commit_with_tests':
+            return self._pipeline_commit_with_tests(request, context)
+        if name == 'message_with_tests':
+            return self._pipeline_message_with_tests(request, context)
+        
+        return {
+            "success": False,
+            "output": f"Unknown pipeline: {name}",
+            "type": "pipeline_unknown"
+        }
+    
+    def _env_flag(self, var_name: str, default: bool) -> bool:
+        """Parse boolean-like environment variable values"""
+        val = os.getenv(var_name)
+        if val is None:
+            return default
+        return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+    
+    def _pipeline_commit_with_tests(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Run tests with CodeAgent, then generate commit message (including test results) and commit if tests pass"""
+        # Shared context
+        shared: Dict[str, Any] = dict(context)
+        shared['pipeline'] = 'commit_with_tests'
+        # Optionally enable coverage in pipeline
+        run_cov = self._env_flag('GTA_PIPELINES_RUN_COVERAGE', False)
+        if run_cov:
+            shared['coverage'] = True
+            cov_thr = os.getenv('GTA_COVERAGE_THRESHOLD')
+            if cov_thr:
+                shared['coverage_threshold'] = cov_thr
+        
+        # 1) Run tests (default: entire suite)
+        code_agent = self._get_agent_by_type('code')
+        if not code_agent:
+            return {"success": False, "output": "CodeAgent not available", "type": "pipeline"}
+        test_req = "executar testes"
+        test_result = code_agent.process(test_req, shared)
+        # Normalize and store in shared context
+        tests_ctx = {
+            'passed': bool(test_result.get('passed')),
+            'output': test_result.get('output', ''),
+            'test_file': test_result.get('test_file', 'all'),
+            'error': test_result.get('error')
+        }
+        shared['tests'] = tests_ctx
+        # Attach coverage if available
+        if run_cov and isinstance(test_result, dict) and test_result.get('coverage'):
+            shared['coverage'] = test_result.get('coverage')
+        
+        # 2) If tests required to pass, stop early on failure
+        require_pass = self._env_flag('GTA_COMMIT_REQUIRE_TESTS_PASS', True)
+        if require_pass and not tests_ctx['passed']:
+            return {
+                "success": False,
+                "output": "Tests failed. Commit aborted (GTA_COMMIT_REQUIRE_TESTS_PASS=1).",
+                "type": "pipeline",
+                "tests": test_result,
+                "coverage": test_result.get('coverage') if isinstance(test_result, dict) else None
+            }
+        
+        # 2b) Optionally enforce coverage threshold before commit
+        require_cov = self._env_flag('GTA_COMMIT_REQUIRE_COVERAGE_PASS', False)
+        if require_cov and run_cov:
+            cov_info = test_result.get('coverage') if isinstance(test_result, dict) else None
+            cov_thr_str = os.getenv('GTA_COVERAGE_THRESHOLD', '').strip()
+            cov_thr = float(cov_thr_str) if cov_thr_str else None
+            below = False
+            val = None
+            if isinstance(cov_info, dict):
+                val = cov_info.get('overall')
+                below = bool(cov_info.get('below_threshold', False))
+                if (val is not None) and (cov_thr is not None):
+                    try:
+                        below = float(val) < float(cov_thr)
+                    except Exception:
+                        pass
+            # If no coverage collected or below threshold, abort
+            if cov_info is None or below:
+                msg = "Coverage requirement not met. Commit aborted (GTA_COMMIT_REQUIRE_COVERAGE_PASS=1)."
+                if val is not None and cov_thr is not None:
+                    msg += f" Current: {val}%, Threshold: {cov_thr}%"
+                return {
+                    "success": False,
+                    "output": msg,
+                    "type": "pipeline",
+                    "tests": test_result,
+                    "coverage": cov_info
+                }
+        
+        # 3) Generate commit message using GitAgent with test context
+        git_agent = self._get_agent_by_type('git')
+        if not git_agent:
+            return {"success": False, "output": "GitAgent not available", "type": "pipeline"}
+        msg_result = git_agent._generate_commit_message(context=shared)  # internal call by design
+        if not msg_result.get('success'):
+            return {
+                "success": False,
+                "output": msg_result.get('output', 'Failed to generate commit message'),
+                "type": "pipeline",
+                "tests": test_result
+            }
+        commit_message = msg_result.get('output', '').strip()
+        
+        # 4) Commit using the generated message
+        commit_result = git_agent.commit_with_message(commit_message)
+        return {
+            "success": commit_result.get('success', False),
+            "output": commit_result.get('output', ''),
+            "type": "pipeline",
+            "tests": test_result,
+            "coverage": test_result.get('coverage') if isinstance(test_result, dict) else None,
+            "commit_message": commit_message
+        }
+    
+    def _pipeline_message_with_tests(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Run tests and generate only the commit message (no commit), embedding test results in prompt"""
+        shared: Dict[str, Any] = dict(context)
+        shared['pipeline'] = 'message_with_tests'
+        run_cov = self._env_flag('GTA_PIPELINES_RUN_COVERAGE', False)
+        if run_cov:
+            shared['coverage'] = True
+            cov_thr = os.getenv('GTA_COVERAGE_THRESHOLD')
+            if cov_thr:
+                shared['coverage_threshold'] = cov_thr
+        
+        code_agent = self._get_agent_by_type('code')
+        if not code_agent:
+            return {"success": False, "output": "CodeAgent not available", "type": "pipeline"}
+        test_result = code_agent.process("executar testes", shared)
+        shared['tests'] = {
+            'passed': bool(test_result.get('passed')),
+            'output': test_result.get('output', ''),
+            'test_file': test_result.get('test_file', 'all'),
+            'error': test_result.get('error')
+        }
+        if run_cov and isinstance(test_result, dict) and test_result.get('coverage'):
+            shared['coverage'] = test_result.get('coverage')
+        
+        git_agent = self._get_agent_by_type('git')
+        if not git_agent:
+            return {"success": False, "output": "GitAgent not available", "type": "pipeline"}
+        msg_result = git_agent._generate_commit_message(context=shared)
+        return {
+            "success": msg_result.get('success', False),
+            "output": msg_result.get('output', ''),
+            "type": "pipeline",
+            "tests": test_result,
+            "coverage": test_result.get('coverage') if isinstance(test_result, dict) else None,
+            "mode": "message_only"
+        }
     def _handle_unclear_request(self, request: str) -> Dict[str, Any]:
         """Handle requests that don't clearly match any agent by focusing on Git intent detection"""
         # Last resort: try ChatAgent for question-like requests
@@ -366,7 +559,17 @@ Examples:
             "Create new code files in any language",
             "Edit existing files",
             "Generate code from descriptions",
-            "Read file contents"
+            "Read file contents",
+            "Run tests and report results"
         ]
         
-        return capabilities 
+        capabilities["ChatAgent"] = [
+            "Answer questions and provide guidance"
+        ]
+        
+        capabilities["Pipelines"] = [
+            "commit_with_tests: run tests, include results in message, commit (requires pass by default)",
+            "message_with_tests: run tests and generate commit message only"
+        ]
+        
+        return capabilities

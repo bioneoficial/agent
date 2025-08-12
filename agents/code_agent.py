@@ -3,6 +3,8 @@ import re
 import time
 import subprocess
 import difflib
+import json
+import ast
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -137,8 +139,11 @@ Diretrizes:
         
         try:
             # Operações de teste
-            if any(word in request_lower for word in ['teste', 'testar', 'pytest', 'unittest', 'jest']):
-                return self._handle_test_request(request)
+            has_test_word = any(word in request_lower for word in ['teste', 'testes', 'testar', 'test', 'pytest', 'unittest', 'jest', 'mocha'])
+            run_words = any(word in request_lower for word in ['rodar', 'rode', 'executar', 'execute', 'run'])
+            mentions_test_file = bool(re.search(r'(?:^|/)(?:test_[^\s]+\.py|[^\s]+_test\.py|[^\s]+_spec\.py|[^\s]+\.(?:test|spec)\.(?:js|ts))', request_lower))
+            if has_test_word or (run_words and mentions_test_file):
+                return self._handle_test_request(request, context)
                 
             # Operações de projeto
             elif any(word in request_lower for word in ['projeto', 'project', 'estrutura', 'structure']):
@@ -178,11 +183,11 @@ Diretrizes:
         # Padrão para capturar o nome do arquivo após 'chamado' ou 'arquivo' até o final da linha ou próximo marcador
         patterns = [
             # Padrão para 'arquivo chamado X' ou 'arquivo X'
-            r'(?:arquivo|file)[\s]+(?:chamado[\s]+)?["\']?([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+)["\']?',
+            r'(?:arquivo|file)[\s]+(?:chamado[\s]+)?["\']?([a-zA-Z0-9_./\\\-]+\.[a-zA-Z0-9]+)["\']?',
             # Padrão para 'criar arquivo X' ou 'novo arquivo X'
-            r'(?:criar|create|new|novo)[\s]+(?:arquivo|file)[\s]+["\']?([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+)["\']?',
+            r'(?:criar|create|new|novo)[\s]+(?:arquivo|file)[\s]+["\']?([a-zA-Z0-9_./\\\-]+\.[a-zA-Z0-9]+)["\']?',
             # Padrão para qualquer nome de arquivo com extensão
-            r'([a-zA-Z0-9_\-]+\.[a-zA-Z0-9]+)'
+            r'([a-zA-Z0-9_./\\\-]+\.[a-zA-Z0-9]+)'
         ]
         
         for pattern in patterns:
@@ -190,20 +195,77 @@ Diretrizes:
             if match:
                 filename = match.group(1).strip()
                 # Remove caracteres inválidos
-                filename = re.sub(r'[^a-zA-Z0-9_\-\.]', '', filename)
+                filename = re.sub(r'[^a-zA-Z0-9_./\\\-\.]', '', filename)
+                filename = os.path.normpath(filename)
                 if filename:
                     return filename
         
-        # Se não encontrou, verifica se há uma extensão mencionada
-        extension = 'txt'
-        for ext in ['html', 'css', 'js', 'py', 'java', 'rb', 'go', 'rs', 'php', 'ts', 'jsx', 'tsx']:
-            if f'.{ext}' in request.lower():
+        # Se não encontrou, inferir a extensão e diretório a partir da linguagem e intenção
+        req_lower = request.lower()
+        
+        # 1) Extensão explícita mencionada no texto (".py", ".js", etc.)
+        extension = None
+        known_exts = ['html', 'css', 'js', 'py', 'java', 'rb', 'go', 'rs', 'php', 'ts', 'jsx', 'tsx', 'json', 'yaml', 'toml', 'ini', 'md', 'sql']
+        for ext in known_exts:
+            if f'.{ext}' in req_lower:
                 extension = ext
                 break
-                
-        # Usa um nome baseado no timestamp
-        timestamp = str(int(time.time()))[-6:]
-        return f"arquivo_{timestamp}.{extension}"
+        
+        # 2) Inferir extensão pela linguagem citada (ex.: "python" -> "py")
+        if not extension:
+            for lang, ext in self.lang_extensions.items():
+                # Ignora mapeamentos que não são extensões de arquivo típicas (ex.: Dockerfile/Makefile)
+                if not isinstance(ext, str) or not re.match(r'^[a-z0-9]{1,5}$', str(ext)):
+                    continue
+                # Usa bordas de palavra para evitar corresponder 'r' em 'rodar', 'go' em 'governance', etc.
+                pattern = r'(?<![a-z0-9])' + re.escape(lang) + r'(?![a-z0-9])'
+                if re.search(pattern, req_lower):
+                    extension = ext
+                    break
+        
+        # 3) Detectar intenção de diretório (ex.: "create a directory named poc")
+        dir_name = None
+        dir_patterns = [
+            r'(?:criar|create|make|mkdir)[^a-z0-9]+(?:diret[óo]rio|pasta|folder|directory)[^a-z0-9]+(?:chamado|named)?[^a-z0-9]+([a-zA-Z0-9_\-]+)',
+            r'(?:diret[óo]rio|pasta|folder|directory)[^a-z0-9]+(?:chamado|named)?[^a-z0-9]+([a-zA-Z0-9_\-]+)'
+        ]
+        for dpat in dir_patterns:
+            dmatch = re.search(dpat, req_lower, re.IGNORECASE)
+            if dmatch:
+                dir_name = re.sub(r'[^a-zA-Z0-9_\-]', '', dmatch.group(1))
+                break
+        
+        # 4) Definir um nome base razoável quando apenas descrição é dada
+        #    Inferir dinamicamente a partir do texto (sem palavras genéricas)
+        base = 'main'
+        tokens = re.findall(r'[a-zA-Z0-9_]+', req_lower)
+        stop = {
+            'create','criar','make','mkdir','new','novo','generate','gerar','write','escrever','build','construir',
+            'file','arquivo','code','código','program','programa','script','project','projeto','module','módulo',
+            'directory','diretório','folder','pasta','named','chamado','inside','dentro','it','ele','ela','and','e',
+            'a','an','um','uma','the','o','os','as','in','em','for','para','with','com','of','de','do','da',
+            'basic','básico','simple','simples','app','application','service','server'
+        }
+        # Remover linguagens e extensões conhecidas do conjunto de candidatos
+        langs = set(list(self.lang_extensions.keys()) + list(set([str(v) for v in self.lang_extensions.values() if isinstance(v, str)])))
+        langs.update({'js','ts','py','rb','rs','go','java','php','json','yaml','toml','ini','md','sql','html','css'})
+        candidates = [t for t in tokens if t not in stop and t not in langs]
+        if dir_name:
+            candidates = [t for t in candidates if t != dir_name]
+        if candidates:
+            base = re.sub(r'[^a-zA-Z0-9_\-]', '', candidates[-1])[:50] or 'main'
+        
+        # 5) Fallback de extensão
+        if not extension:
+            extension = 'txt'
+        
+        # 6) Montar caminho final
+        if dir_name:
+            return f"{dir_name}/{base}.{extension}"
+        else:
+            # Caso nenhum diretório tenha sido fornecido, ainda assim gerar um nome estável
+            timestamp = str(int(time.time()))[-6:]
+            return f"{base}_{timestamp}.{extension}"
     
     def _generate_code_content(self, request: str, filename: str) -> str:
         """Generate code content based on request"""
@@ -242,6 +304,67 @@ Return ONLY the code content, nothing else:"""
         code = re.sub(r'\n```$', '', code)
         
         return code
+    
+    def _generate_python_tests_for_source(self, source_file: str) -> Tuple[str, str]:
+        """Gera conteúdo de testes (pytest) para um arquivo Python.
+        Retorna (test_filepath, content).
+        """
+        source_file = os.path.normpath(source_file)
+        src_dir = os.path.dirname(source_file) or '.'
+        base_name = os.path.splitext(os.path.basename(source_file))[0]
+        test_file = os.path.join(src_dir, f"test_{base_name}.py")
+        
+        # Tenta extrair funções e métodos com AST (robusto para Python)
+        funcs: List[str] = []
+        classes: List[Tuple[str, List[str]]] = []
+        try:
+            with open(source_file, 'r', encoding='utf-8') as f:
+                src = f.read()
+            tree = ast.parse(src)
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef) and not node.name.startswith('_'):
+                    funcs.append(node.name)
+                elif isinstance(node, ast.ClassDef):
+                    methods = []
+                    for m in node.body:
+                        if isinstance(m, ast.FunctionDef) and not m.name.startswith('_') and m.name not in ('__init__', '__repr__'):
+                            methods.append(m.name)
+                    classes.append((node.name, methods))
+        except Exception:
+            pass
+        
+        # Gera conteúdo de teste usando import via caminho do arquivo (não requer pacote)
+        lines: List[str] = []
+        lines.append("import importlib.util, pathlib")
+        lines.append("import types")
+        lines.append("")
+        lines.append(f"MODULE_PATH = pathlib.Path(__file__).parent / '{os.path.basename(source_file)}'")
+        lines.append("spec = importlib.util.spec_from_file_location('tested_module', MODULE_PATH)")
+        lines.append("tested_module = importlib.util.module_from_spec(spec)")
+        lines.append("assert spec.loader is not None")
+        lines.append("spec.loader.exec_module(tested_module)")
+        lines.append("")
+        
+        if not funcs and not any(m for _, m in classes):
+            # Teste básico para garantir import
+            lines.append("def test_module_imports():")
+            lines.append("    assert isinstance(tested_module, types.ModuleType)")
+        else:
+            for fn in funcs:
+                lines.append("")
+                lines.append(f"def test_has_function_{fn}():")
+                lines.append(f"    assert hasattr(tested_module, '{fn}')")
+            for cls, methods in classes:
+                lines.append("")
+                lines.append(f"def test_has_class_{cls}():")
+                lines.append(f"    assert hasattr(tested_module, '{cls}')")
+                for m in methods:
+                    lines.append("")
+                    lines.append(f"def test_class_{cls}_has_method_{m}():")
+                    lines.append(f"    assert hasattr(getattr(tested_module, '{cls}'), '{m}')")
+        
+        content = "\n".join(lines) + "\n"
+        return test_file, content
     
     def _create_file(self, request: str) -> Dict[str, Any]:
         """Cria um novo arquivo com conteúdo gerado automaticamente.
@@ -544,13 +667,13 @@ Return ONLY the code content, nothing else:"""
                 "type": "file_edit"
             }
     
-    def _handle_test_request(self, request: str) -> Dict[str, Any]:
+    def _handle_test_request(self, request: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Processa solicitações relacionadas a execução e geração de testes.
         
         Este método é responsável por lidar com diversos cenários de teste, incluindo:
         - Execução de testes unitários e de integração
         - Geração de testes automatizados
-        - Análise de cobertura de testes
+        - Análise de cobertura de testes (opcional)
         - Identificação de frameworks de teste suportados
         
         Args:
@@ -558,7 +681,8 @@ Return ONLY the code content, nothing else:"""
                    - Nome do arquivo de teste
                    - Comando de teste específico (ex: 'rodar testes')
                    - Solicitação para gerar novos testes
-                   
+            context: Dicionário opcional para sinalizar opções (ex: coverage=True, coverage_threshold=80)
+                    
         Returns:
             Dict[str, Any]: Dicionário contendo:
                 - success: bool indicando se a operação foi bem-sucedida
@@ -566,6 +690,7 @@ Return ONLY the code content, nothing else:"""
                 - type: str indicando o tipo de operação ("test_execution" ou "test_generation")
                 - test_framework: str com o framework de teste utilizado (opcional)
                 - test_file: str com o caminho do arquivo de teste (opcional)
+                - coverage: dict com resumo de cobertura (quando habilitado)
                 
         Exemplos de uso:
             >>> agent._handle_test_request("executar testes em test_calculadora.py")
@@ -582,10 +707,10 @@ Return ONLY the code content, nothing else:"""
         test_file = None
         source_file = None
         
-        # Verifica se há menção a um arquivo específico
+        # Verifica se há menção a um arquivo específico (apenas se existir, para evitar falsos positivos do fallback)
         filename = self._extract_filename(request)
         
-        if filename:
+        if filename and os.path.exists(filename):
             if 'test' in filename.lower() or 'spec' in filename.lower():
                 test_file = filename
             else:
@@ -607,15 +732,104 @@ Return ONLY the code content, nothing else:"""
                 if test_file:
                     break
         
-        # Executa os testes
+        # Sinalizadores de cobertura via context/env
+        coverage_enabled = False
+        if isinstance(context, dict) and context.get('coverage'):
+            coverage_enabled = True
+        env_flag = os.getenv('GTA_TESTS_ENABLE_COVERAGE', '').strip().lower()
+        if env_flag in ('1', 'true', 'yes', 'on'):
+            coverage_enabled = True
+
+        coverage_threshold: Optional[float] = None
+        thr_src = None
+        if isinstance(context, dict):
+            thr_src = context.get('coverage_threshold')
+        if thr_src is None:
+            thr_src = os.getenv('GTA_COVERAGE_THRESHOLD', '').strip() or None
+        if thr_src is not None:
+            try:
+                coverage_threshold = float(thr_src)
+            except Exception:
+                coverage_threshold = None
+
+        # 0) Detecção de intenção de geração de testes
+        request_lower = request.lower()
+        gen_intent = (
+            any(w in request_lower for w in ['gerar', 'criar', 'crie', 'generate', 'create']) and
+            any(w in request_lower for w in ['teste', 'testes', 'test', 'arquivo de teste', 'arquivo de testes', 'test file'])
+        )
+
+        # Se a intenção é gerar testes e há um arquivo fonte, gera e retorna sem executar pytest
+        if gen_intent and source_file:
+            ext = os.path.splitext(source_file)[1].lower()
+            try:
+                if ext == '.py':
+                    test_path, content = self._generate_python_tests_for_source(source_file)
+                else:
+                    return {
+                        "success": False,
+                        "output": f"Geração de testes automática não suportada para arquivos com extensão '{ext}'.",
+                        "type": "test_generation"
+                    }
+                # Evita sobrescrever testes existentes
+                if os.path.exists(test_path):
+                    return {
+                        "success": True,
+                        "output": f"Arquivo de testes já existe: {test_path}",
+                        "type": "test_generation",
+                        "test_file": test_path
+                    }
+                with open(test_path, 'w', encoding='utf-8') as tf:
+                    tf.write(content)
+                return {
+                    "success": True,
+                    "output": f"Arquivo de testes criado: {test_path}",
+                    "type": "test_generation",
+                    "test_file": test_path,
+                    "content_preview": content[:200] + '...' if len(content) > 200 else content
+                }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "output": f"Erro ao gerar arquivo de testes: {str(e)}",
+                    "type": "test_generation",
+                    "error": str(e)
+                }
+
+        # 1) Executa os testes
         try:
+            # Determina raiz do repositório/projeto sem invocar git (evita conflitos em testes)
+            def _scan_up_for_git(start_dir: str) -> str:
+                p = Path(start_dir).resolve()
+                for parent in [p] + list(p.parents):
+                    if (parent / '.git').exists():
+                        return str(parent)
+                return str(p)
+
+            start_dir = None
+            if test_file:
+                start_dir = os.path.dirname(os.path.abspath(test_file)) or os.getcwd()
+            elif source_file:
+                start_dir = os.path.dirname(os.path.abspath(source_file)) or os.getcwd()
+            else:
+                start_dir = os.getcwd()
+            repo_root = _scan_up_for_git(start_dir)
+            cov_dir = self._ensure_gta_dir(repo_root)  # returns .gta/coverage
+            xml_path = os.path.join(cov_dir, 'coverage.xml')
+            json_path = os.path.join(cov_dir, 'summary.json')
+
             if test_file:
                 # Executa o arquivo de teste específico
+                cmd: List[str] = ['pytest', test_file]
+                if coverage_enabled:
+                    cmd += ['--cov=.', f'--cov-report=xml:{xml_path}', '--cov-report=term-missing:skip-covered']
+                cmd += ['-q']
                 result = subprocess.run(
-                    ['pytest', test_file],
+                    cmd,
                     capture_output=True,
                     text=True,
-                    encoding='utf-8'
+                    encoding='utf-8',
+                    cwd=repo_root
                 )
                 output = result.stdout
                 
@@ -624,16 +838,53 @@ Return ONLY the code content, nothing else:"""
                     output_with_test_file = f"Testes executados com sucesso em {test_file}:\n\n{output}"
                     if test_file not in output:
                         output_with_test_file = f"Testes executados com sucesso em {test_file}:\n\n{output}"
-                        
-                    return {
+
+                    resp: Dict[str, Any] = {
                         "success": True,
                         "output": output_with_test_file,
                         "type": "test_execution",
                         "test_file": test_file,
                         "passed": True
                     }
+                    if coverage_enabled:
+                        # Verifica se o plugin pytest-cov está disponível (erros de opção)
+                        if 'unrecognized arguments' in (result.stderr or '') or 'no such option' in (result.stderr or '').lower():
+                            resp["coverage_error"] = "pytest-cov não está instalado no ambiente do projeto. Instale com: pip install pytest-cov"
+                        else:
+                            # Tenta parsear o XML e salvar resumo JSON
+                            if os.path.exists(xml_path):
+                                summary = self._parse_coverage_xml(xml_path)
+                                # Salva JSON
+                                try:
+                                    with open(json_path, 'w', encoding='utf-8') as jf:
+                                        json.dump({
+                                            "overall": summary.get('overall'),
+                                            "per_file": summary.get('per_file'),
+                                            "low_files": summary.get('low_files'),
+                                            "generated_at": int(time.time())
+                                        }, jf, ensure_ascii=False, indent=2)
+                                except Exception:
+                                    pass
+                                cov_info = {
+                                    "overall": summary.get('overall'),
+                                    "xml": xml_path,
+                                    "json": json_path,
+                                    "low_files": summary.get('low_files')
+                                }
+                                if isinstance(coverage_threshold, (int, float)):
+                                    cov_info["threshold"] = coverage_threshold
+                                    try:
+                                        cov_val = float(summary.get('overall') or 0)
+                                        cov_info["below_threshold"] = cov_val < float(coverage_threshold)
+                                    except Exception:
+                                        pass
+                                resp["coverage"] = cov_info
+                            else:
+                                resp["coverage_error"] = "Arquivo de cobertura não encontrado após execução."
+
+                    return resp
                 else:
-                    return {
+                    resp: Dict[str, Any] = {
                         "success": False,
                         "output": f"Falha nos testes em {test_file}:\n\n{output}",
                         "type": "test_execution",
@@ -641,26 +892,74 @@ Return ONLY the code content, nothing else:"""
                         "passed": False,
                         "error": result.stderr
                     }
+                    # Ainda assim tenta coletar cobertura se habilitado
+                    if coverage_enabled and os.path.exists(xml_path):
+                        summary = self._parse_coverage_xml(xml_path)
+                        resp["coverage"] = {
+                            "overall": summary.get('overall'),
+                            "xml": xml_path,
+                            "json": json_path,
+                            "low_files": summary.get('low_files')
+                        }
+                    return resp
             else:
                 # Tenta executar todos os testes no diretório atual
+                cmd: List[str] = ['pytest']
+                if coverage_enabled:
+                    cmd += ['--cov=.', f'--cov-report=xml:{xml_path}', '--cov-report=term-missing:skip-covered']
+                cmd += ['-q']
                 result = subprocess.run(
-                    ['pytest'],
+                    cmd,
                     capture_output=True,
                     text=True,
-                    encoding='utf-8'
+                    encoding='utf-8',
+                    cwd=repo_root
                 )
                 output = result.stdout
                 
                 if result.returncode == 0:
-                    return {
+                    resp: Dict[str, Any] = {
                         "success": True,
                         "output": f"Testes executados com sucesso no diretório atual:\n\n{output}",
                         "type": "test_execution",
                         "test_file": "all",
                         "passed": True
                     }
+                    if coverage_enabled:
+                        if 'unrecognized arguments' in (result.stderr or '') or 'no such option' in (result.stderr or '').lower():
+                            resp["coverage_error"] = "pytest-cov não está instalado no ambiente do projeto. Instale com: pip install pytest-cov"
+                        else:
+                            if os.path.exists(xml_path):
+                                summary = self._parse_coverage_xml(xml_path)
+                                try:
+                                    with open(json_path, 'w', encoding='utf-8') as jf:
+                                        json.dump({
+                                            "overall": summary.get('overall'),
+                                            "per_file": summary.get('per_file'),
+                                            "low_files": summary.get('low_files'),
+                                            "generated_at": int(time.time())
+                                        }, jf, ensure_ascii=False, indent=2)
+                                except Exception:
+                                    pass
+                                cov_info = {
+                                    "overall": summary.get('overall'),
+                                    "xml": xml_path,
+                                    "json": json_path,
+                                    "low_files": summary.get('low_files')
+                                }
+                                if isinstance(coverage_threshold, (int, float)):
+                                    cov_info["threshold"] = coverage_threshold
+                                    try:
+                                        cov_val = float(summary.get('overall') or 0)
+                                        cov_info["below_threshold"] = cov_val < float(coverage_threshold)
+                                    except Exception:
+                                        pass
+                                resp["coverage"] = cov_info
+                            else:
+                                resp["coverage_error"] = "Arquivo de cobertura não encontrado após execução."
+                    return resp
                 else:
-                    return {
+                    resp: Dict[str, Any] = {
                         "success": False,
                         "output": f"Falha nos testes:\n\n{output}",
                         "type": "test_execution",
@@ -668,6 +967,15 @@ Return ONLY the code content, nothing else:"""
                         "passed": False,
                         "error": result.stderr
                     }
+                    if coverage_enabled and os.path.exists(xml_path):
+                        summary = self._parse_coverage_xml(xml_path)
+                        resp["coverage"] = {
+                            "overall": summary.get('overall'),
+                            "xml": xml_path,
+                            "json": json_path,
+                            "low_files": summary.get('low_files')
+                        }
+                    return resp
                     
         except Exception as e:
             return {
@@ -676,7 +984,69 @@ Return ONLY the code content, nothing else:"""
                 "type": "test_execution",
                 "error": str(e)
             }
-    
+
+    def _find_repo_root(self) -> str:
+        """Encontra a raiz do repositório/projeto (usa git quando disponível)."""
+        try:
+            result = subprocess.run(
+                ['git', 'rev-parse', '--show-toplevel'],
+                capture_output=True,
+                text=True,
+                encoding='utf-8'
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+        # Fallback: sobe diretórios até encontrar .git
+        cwd = Path(os.getcwd())
+        for parent in [cwd] + list(cwd.parents):
+            if (parent / '.git').exists():
+                return str(parent)
+        return os.getcwd()
+
+    def _ensure_gta_dir(self, repo_root: str) -> str:
+        """Garante que o diretório .gta/coverage exista e retorna seu caminho."""
+        path = os.path.join(repo_root, '.gta', 'coverage')
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _parse_coverage_xml(self, xml_path: str) -> Dict[str, Any]:
+        """Lê um arquivo Cobertura XML e retorna um resumo de cobertura.
+        Retorna: { overall: float, per_file: {filename: float}, low_files: [{file, coverage, uncovered}] }
+        """
+        try:
+            import xml.etree.ElementTree as ET
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+            overall = round(float(root.get('line-rate', '0')) * 100.0, 2)
+            per_file: Dict[str, float] = {}
+            worst: List[Dict[str, Any]] = []
+
+            for cls in root.findall('.//class'):
+                fname = cls.get('filename') or ''
+                lr = cls.get('line-rate') or '0'
+                try:
+                    cov = round(float(lr) * 100.0, 2)
+                except Exception:
+                    cov = 0.0
+                uncovered = 0
+                lines_elem = cls.find('lines')
+                if lines_elem is not None:
+                    for line in lines_elem.findall('line'):
+                        try:
+                            if int(line.get('hits', '0')) == 0:
+                                uncovered += 1
+                        except Exception:
+                            pass
+                per_file[fname] = cov
+                worst.append({"file": fname, "coverage": cov, "uncovered": uncovered})
+
+            low_files = sorted(worst, key=lambda x: (x['coverage'], -x['uncovered']))[:10]
+            return {"overall": overall, "per_file": per_file, "low_files": low_files}
+        except Exception as e:
+            return {"error": str(e)}
+
     def _handle_project_request(self, request: str) -> Dict[str, Any]:
         """Gerencia operações relacionadas a projetos de software.
         

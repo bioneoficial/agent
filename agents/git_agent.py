@@ -96,9 +96,9 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
         # Determine the type of Git operation
         if any(word in request_lower for word in ['commit', 'commitar', 'comitar']):
             if any(word in request_lower for word in ['descrit', 'inteligente', 'auto', 'analise']):
-                return self._generate_commit_message()
+                return self._generate_commit_message(context=context)
             else:
-                return self._simple_commit()
+                return self._simple_commit(context=context)
         elif 'status' in request_lower:
             return self._git_status()
         elif 'diff' in request_lower:
@@ -782,8 +782,10 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
             
         return keywords
     
-    def _generate_commit_message(self) -> Dict[str, Any]:
-        """Generate an intelligent commit message based on staged changes"""
+    def _generate_commit_message(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Generate an intelligent commit message based on staged changes.
+        If provided, uses optional context (e.g., test results) to enrich the prompt.
+        """
         # Get diff information for complete context
         diff_result = self._safe_git_command("diff --cached")
         if not diff_result["success"] or not diff_result["output"]:
@@ -820,6 +822,46 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
         
         # Generate a diff summary to provide a high‑level overview of insertions/deletions per file
         diff_summary = self._generate_diff_summary()
+        
+        # Include test results context if available
+        test_section = ""
+        try:
+            if context and isinstance(context, dict) and context.get('tests'):
+                tests = context['tests']
+                passed = tests.get('passed')
+                status = 'PASSED' if passed else 'FAILED'
+                test_target = tests.get('test_file', 'all')
+                raw_output = tests.get('output', '') or ''
+                # Keep the test output concise
+                lines = [l for l in str(raw_output).splitlines() if l.strip()]
+                short_output = "\n".join(lines[-30:]) if lines else "(no test output)"
+                test_section = f"""\nTest Results:\n- Status: {status}\n- Target: {test_target}\n- Output (last lines):\n{short_output}\n"""
+        except Exception:
+            # Don't block message generation if context isn't as expected
+            test_section = ""
+        
+        # Include coverage context if available
+        coverage_section = ""
+        try:
+            if context and isinstance(context, dict) and context.get('coverage'):
+                cov = context['coverage']
+                if isinstance(cov, dict):
+                    overall = cov.get('overall')
+                    threshold = cov.get('threshold')
+                    below = cov.get('below_threshold')
+                    low_files = cov.get('low_files') or []
+                    top_low = ", ".join([os.path.basename(x.get('file', '')) for x in low_files[:5] if isinstance(x, dict)])
+                    coverage_section = "\nCoverage:\n"
+                    if overall is not None:
+                        coverage_section += f"- Overall: {overall}%\n"
+                    if threshold is not None:
+                        coverage_section += f"- Threshold: {threshold}%\n"
+                    if below is not None:
+                        coverage_section += f"- Below threshold: {below}\n"
+                    if top_low:
+                        coverage_section += f"- Low coverage files: {top_low}\n"
+        except Exception:
+            coverage_section = ""
         # Prepare prompt for LLM with rich context and structure, including diff summary if available
         prompt = f"""Generate a single semantic commit message for these changes following the Conventional Commits specification.
 
@@ -842,6 +884,9 @@ Diff Summary:
 
 Relevant Code Changes:
 {code_samples}
+
+{test_section}
+{coverage_section}
 
 ## Guidance
 {f'Tipo de commit sugerido: {final_type}' if final_type else 'Escolha o tipo de commit mais apropriado (feat, fix, docs, style, refactor, test, chore, perf, ci, build)'}
@@ -903,6 +948,25 @@ Retorne APENAS a mensagem de commit no formato: type(scope): description
                 "success": False,
                 "output": f"Failed to generate commit message: {str(e)}",
                 "type": "commit_message",
+                "error": str(e)
+            }
+
+    def commit_with_message(self, message: str) -> Dict[str, Any]:
+        """Commit staged changes with a provided message, with sanitization."""
+        try:
+            sanitized_message = (message or "").strip().replace('"', '\\"').replace("'", "\\'").replace('\n', ' ')
+            commit_result = self._safe_git_command(f'commit -m "{sanitized_message}"')
+            return {
+                "success": commit_result.get("success", False),
+                "output": commit_result.get("output", ""),
+                "type": "commit",
+                "message": message
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "output": f"Error committing changes: {str(e)}",
+                "type": "commit",
                 "error": str(e)
             }
     
@@ -1264,10 +1328,10 @@ Retorne APENAS a mensagem de commit no formato: type(scope): description
         # If pattern doesn't match, return original but strip trailing period
         return message.rstrip('.')
     
-    def _simple_commit(self) -> Dict[str, Any]:
+    def _simple_commit(self, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Perform a simple commit with generated message"""
         # First generate the message
-        msg_result = self._generate_commit_message()
+        msg_result = self._generate_commit_message(context=context)
         if not msg_result["success"]:
             return msg_result
         

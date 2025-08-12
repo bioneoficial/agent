@@ -52,6 +52,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# GTA artifacts (coverage and pipeline data)
+.gta/
+
 # Translations
 *.mo
 *.pot
