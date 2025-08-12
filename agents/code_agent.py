@@ -5,6 +5,7 @@ import subprocess
 import difflib
 import json
 import ast
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -138,38 +139,68 @@ Diretrizes:
         request_lower = request.lower()
         
         try:
-            # Operações de teste
-            has_test_word = any(word in request_lower for word in ['teste', 'testes', 'testar', 'test', 'pytest', 'unittest', 'jest', 'mocha'])
-            run_words = any(word in request_lower for word in ['rodar', 'rode', 'executar', 'execute', 'run'])
-            mentions_test_file = bool(re.search(r'(?:^|/)(?:test_[^\s]+\.py|[^\s]+_test\.py|[^\s]+_spec\.py|[^\s]+\.(?:test|spec)\.(?:js|ts))', request_lower))
-            if has_test_word or (run_words and mentions_test_file):
-                return self._handle_test_request(request, context)
-                
-            # Operações de projeto
-            elif any(word in request_lower for word in ['projeto', 'project', 'estrutura', 'structure']):
+            # Novo: parser estruturado de intenção, substitui heurísticas soltas
+            intent = self._parse_request(request)
+            if intent is None:
+                return {
+                    "success": False,
+                    "output": (
+                        "Não entendi completamente seu pedido. Dicas:\n\n"
+                        "• Para rodar testes: 'rodar testes' ou 'rodar testes em poc/test_x.py'\n"
+                        "• Para gerar testes: 'crie testes para poc/x.py'\n"
+                        "• Para criar arquivo: 'criar arquivo nome.ext'\n"
+                        "• Para editar arquivo: 'editar arquivo nome.ext'"
+                    ),
+                    "type": "help"
+                }
+
+            action = intent.action
+            # Roteamento por intenção
+            if action == 'run_tests':
+                ctx = dict(context or {})
+                if intent.targets:
+                    target = intent.targets[0]
+                    if self._is_test_file_path(target):
+                        ctx['test_file'] = target
+                    else:
+                        ctx['source_file'] = target
+                if 'coverage' in intent.options:
+                    ctx['coverage'] = intent.options['coverage']
+                if 'coverage_threshold' in intent.options:
+                    ctx['coverage_threshold'] = intent.options['coverage_threshold']
+                return self._handle_test_request(request, ctx)
+            
+            if action == 'generate_tests':
+                ctx = dict(context or {})
+                if intent.targets:
+                    ctx['source_file'] = intent.targets[0]
+                return self._handle_test_request(request, ctx)
+
+            if action == 'project_structure':
                 return self._handle_project_request(request)
-                
-            # Operações de arquivo
-            elif any(word in request_lower for word in ['criar', 'create', 'novo', 'new', 'gerar', 'generate']):
+
+            if action == 'create_file':
                 return self._create_file(request)
-                
-            elif any(word in request_lower for word in ['editar', 'edit', 'modificar', 'modify', 'alterar', 'change']):
+
+            if action == 'edit_file':
                 return self._edit_file(request)
-                
-            elif any(word in request_lower for word in ['ler', 'read', 'mostrar', 'show', 'exibir', 'display']):
+
+            if action == 'read_file':
                 return self._read_file(request)
-                
-            # Análise e refatoração
-            elif any(word in request_lower for word in ['analisar', 'analise', 'analyze', 'review', 'revisar']):
+
+            if action == 'analyze':
                 return self._analyze_code(request)
-                
-            elif any(word in request_lower for word in ['refatorar', 'refactor', 'melhorar', 'improve']):
+
+            if action == 'refactor':
                 return self._refactor_code(request)
-                
-            # Padrão: tentar criar arquivo
-            else:
-                return self._create_file(request)
-                
+
+            # Fallback seguro: ajuda
+            return {
+                "success": False,
+                "output": "Pedido não reconhecido. Tente ser mais específico ou peça ajuda.",
+                "type": "help"
+            }
+
         except Exception as e:
             return {
                 "success": False,
@@ -305,6 +336,65 @@ Return ONLY the code content, nothing else:"""
         
         return code
     
+    @dataclass
+    class RequestIntent:
+        action: str
+        targets: List[str]
+        options: Dict[str, Any]
+        confidence: float = 1.0
+
+    def _is_test_file_path(self, path: str) -> bool:
+        p = path.lower()
+        return bool(re.search(r'(?:^|/)(?:test_[^/]+\.py|[^/]+_test\.py|[^/]+_spec\.py|[^/]+\.(?:test|spec)\.(?:js|ts))$', p))
+
+    def _parse_request(self, request: str) -> Optional['CodeAgent.RequestIntent']:
+        """Parser determinístico de intenção a partir do texto do usuário."""
+        t = (request or '').strip()
+        if not t:
+            return None
+        tl = t.lower()
+
+        # 1) Run tests em arquivo explícito
+        m = re.search(r'(rodar|rode|executar|execute|run)\s+([^\s]+)', tl)
+        if m:
+            candidate = m.group(2)
+            # Normaliza aspas
+            candidate = candidate.strip("'\"")
+            if self._is_test_file_path(candidate):
+                return CodeAgent.RequestIntent('run_tests', [candidate], {})
+
+        # 2) Run tests (geral)
+        if any(w in tl for w in ['pytest', 'rodar testes', 'executar testes', 'run tests']) or (
+            'testes' in tl and any(v in tl for v in ['rodar', 'rode', 'executar', 'execute', 'run'])
+        ) or tl in {'rodar testes', 'executar testes'}:
+            return CodeAgent.RequestIntent('run_tests', [], {})
+
+        # 3) Generate tests para um arquivo fonte
+        m = re.search(r'(gerar|criar|crie|generate|create).*?(teste|testes|test).*?(para|de|do|for)\s+([^\s]+\.(py|js|ts))', tl)
+        if m:
+            src = m.group(4).strip("'\"")
+            return CodeAgent.RequestIntent('generate_tests', [src], {})
+
+        # 4) Projeto/Estrutura
+        if any(w in tl for w in ['projeto', 'project', 'estrutura', 'structure']):
+            return CodeAgent.RequestIntent('project_structure', [], {})
+
+        # 5) Editar/Ler/Refatorar/Analisar
+        if any(w in tl for w in ['editar', 'edit', 'modificar', 'modify', 'alterar', 'change']):
+            return CodeAgent.RequestIntent('edit_file', [], {})
+        if any(w in tl for w in ['ler', 'read', 'mostrar', 'show', 'exibir', 'display']):
+            return CodeAgent.RequestIntent('read_file', [], {})
+        if any(w in tl for w in ['analisar', 'analise', 'analyze', 'review', 'revisar']):
+            return CodeAgent.RequestIntent('analyze', [], {})
+        if any(w in tl for w in ['refatorar', 'refactor', 'melhorar', 'improve']):
+            return CodeAgent.RequestIntent('refactor', [], {})
+
+        # 6) Criar arquivo (explícito)
+        if re.search(r'(criar|create|novo|new|gerar|generate)\s+(arquivo|file)\s+[^\s]+\.[a-z0-9]+', tl):
+            return CodeAgent.RequestIntent('create_file', [], {})
+
+        return None
+
     def _generate_python_tests_for_source(self, source_file: str) -> Tuple[str, str]:
         """Gera conteúdo de testes (pytest) para um arquivo Python.
         Retorna (test_filepath, content).
@@ -707,6 +797,15 @@ Return ONLY the code content, nothing else:"""
         test_file = None
         source_file = None
         
+        # 0) Respeita contexto explícito (se fornecido pelo parser)
+        if isinstance(context, dict):
+            ctx_test = context.get('test_file')
+            if isinstance(ctx_test, str) and os.path.exists(ctx_test):
+                test_file = ctx_test
+            ctx_src = context.get('source_file')
+            if test_file is None and isinstance(ctx_src, str) and os.path.exists(ctx_src):
+                source_file = ctx_src
+        
         # Verifica se há menção a um arquivo específico (apenas se existir, para evitar falsos positivos do fallback)
         filename = self._extract_filename(request)
         
@@ -814,9 +913,15 @@ Return ONLY the code content, nothing else:"""
             else:
                 start_dir = os.getcwd()
             repo_root = _scan_up_for_git(start_dir)
-            cov_dir = self._ensure_gta_dir(repo_root)  # returns .gta/coverage
-            xml_path = os.path.join(cov_dir, 'coverage.xml')
-            json_path = os.path.join(cov_dir, 'summary.json')
+            # Cria diretório de cobertura apenas quando habilitado
+            if coverage_enabled:
+                cov_dir = self._ensure_gta_dir(repo_root)  # returns .gta/coverage
+                xml_path = os.path.join(cov_dir, 'coverage.xml')
+                json_path = os.path.join(cov_dir, 'summary.json')
+            else:
+                cov_dir = None
+                xml_path = None
+                json_path = None
 
             if test_file:
                 # Executa o arquivo de teste específico
