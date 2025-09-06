@@ -2,6 +2,7 @@
 langchain_ollama>=0.0.1
 langchain-core>=0.1.0
 langchain-community>=0.0.1
+langgraph>=0.0.40
 regex>=2023.0.0
 python-dotenv>=1.0.0
 

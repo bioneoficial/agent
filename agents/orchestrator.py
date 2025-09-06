@@ -3,6 +3,8 @@ from agents.base_agent import BaseAgent
 from agents.git_agent import GitAgent
 from agents.code_agent import CodeAgent
 from agents.chat_agent import ChatAgent
+from agents.planner_agent import PlannerAgent
+from agents.workflow_executor import WorkflowExecutor
 from langchain.memory import ConversationBufferMemory
 import subprocess
 import shlex
@@ -22,6 +24,11 @@ class Orchestrator:
         
         # Initialize conversation memory for persistent context
         self.memory = ConversationBufferMemory(return_messages=True)
+        
+        # Initialize planning system
+        self.planner_enabled = os.getenv('GTA_PLANNER_ENABLED', '1') == '1'
+        self.planner = PlannerAgent() if self.planner_enabled else None
+        self.workflow_executor = WorkflowExecutor(self) if self.planner_enabled else None
         
         # Router configuration
         self.router_strategy = os.getenv('GTA_ROUTER', 'llm').lower()
@@ -91,6 +98,30 @@ class Orchestrator:
                 {"output": result.get("output", "")}
             )
             return result
+        
+        # Check for composite requests that need planning (if planner is enabled)
+        if self.planner_enabled and self.planner and not context.get("planned", False):
+            if self.planner.is_composite_request(request):
+                try:
+                    # Create task plan
+                    plan_result = self.planner.process(request, context)
+                    if plan_result.get("success") and plan_result.get("plan"):
+                        # Execute the plan using workflow executor
+                        execution_result = self.workflow_executor.execute_plan(
+                            plan_result["plan"], context
+                        )
+                        # Save interaction to memory
+                        self.memory.save_context(
+                            {"input": request},
+                            {"output": execution_result.get("output", "")}
+                        )
+                        return execution_result
+                    else:
+                        # Planning failed, fall back to normal routing
+                        print(f"⚠️ Planejamento falhou, usando roteamento normal: {plan_result.get('output', '')}")
+                except Exception as e:
+                    print(f"⚠️ Erro no sistema de planejamento: {str(e)}, usando roteamento normal")
+                    # Continue to normal routing
         
         # Detect and run collaboration pipelines before normal routing
         pipeline = self._detect_pipeline(request)
