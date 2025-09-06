@@ -52,15 +52,33 @@ Nunca assuma que uma pergunta é um comando para criar ou modificar arquivos."""
         # Extrair informações de contexto relevantes para enriquecer o prompt
         request_lower = request.lower()
         
+        # Extract conversation history from memory
+        memory = context.get("memory") if context else None
+        history_text = ""
+        if memory:
+            # Get last 5 exchanges for context
+            history_snippets = []
+            msgs = memory.chat_memory.messages  # list of messages
+            # Combine each pair of user/assistant into "User: ..., AI: ..."
+            for i in range(0, len(msgs), 2):
+                if i+1 < len(msgs):
+                    user_msg = msgs[i].content
+                    ai_msg = msgs[i+1].content
+                    history_snippets.append(f"Usuário: {user_msg}\nAI: {ai_msg}")
+            
+            if history_snippets:
+                history_text = "\n\n".join(history_snippets[-5:]) + "\n\n"
+        
         # Detectar possível contexto na pergunta
         context_info = self._extract_context_from_request(request)
         
-        # Construir prompt para o LLM com as informações de contexto
-        prompt = f"""O usuário fez a seguinte pergunta:
+        # Construir prompt para o LLM com histórico de conversação e contexto
+        prompt = f"""{history_text}O usuário fez a seguinte pergunta:
 "{request}"
 
 Forneça uma resposta informativa e útil, sem assumir que é um comando para executar ações.
 Responda em português, com explicações claras e exemplos quando relevante.
+Use o histórico da conversa acima para fornecer respostas mais contextualizadas e coerentes.
 """
         
         # Adicionar contexto ao prompt se houver informações relevantes

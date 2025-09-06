@@ -47,13 +47,22 @@ class BaseAgent(ABC):
         """Process the request and return result"""
         pass
     
-    def invoke_llm(self, prompt: str, temperature: float = 0.3) -> str:
-        """Invoke LLM with error handling"""
+    def invoke_llm(self, prompt: str, memory=None, temperature: float = 0.3) -> str:
+        """Invoke LLM with error handling and optional memory context"""
         try:
-            messages = [
-                SystemMessage(content=self.system_prompt),
-                HumanMessage(content=prompt)
-            ]
+            messages = []
+            
+            # Include conversation history if memory is provided
+            if memory and hasattr(memory, 'chat_memory'):
+                # Add last 3 exchanges for context (to avoid token limits)
+                msgs = memory.chat_memory.messages[-6:]  # Last 3 exchanges (6 messages)
+                for msg in msgs:
+                    messages.append(msg)
+            
+            # Always append system prompt and current user prompt at the end
+            messages.append(SystemMessage(content=self.system_prompt))
+            messages.append(HumanMessage(content=prompt))
+            
             # ChatOllama doesn't support temperature in invoke method
             response = self.llm.invoke(messages)
             return self.sanitize_llm_response(response.content)

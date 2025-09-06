@@ -862,8 +862,26 @@ Use as informações da análise do diff para gerar uma mensagem mais precisa. P
                         coverage_section += f"- Low coverage files: {top_low}\n"
         except Exception:
             coverage_section = ""
+        # Extract conversation history for better context awareness
+        memory = context.get("memory") if context else None
+        history_context = ""
+        if memory:
+            # Get last few exchanges for context about recent work
+            history_snippets = []
+            msgs = memory.chat_memory.messages[-8:]  # Last 4 exchanges
+            for i in range(0, len(msgs), 2):
+                if i+1 < len(msgs):
+                    user_msg = msgs[i].content
+                    ai_msg = msgs[i+1].content
+                    # Only include relevant history (file operations, git operations)
+                    if any(keyword in user_msg.lower() for keyword in ['arquivo', 'file', 'criar', 'create', 'editar', 'edit', 'commit', 'git']):
+                        history_snippets.append(f"Usuário: {user_msg}\nAI: {ai_msg}")
+            
+            if history_snippets:
+                history_context = "Contexto de trabalho recente:\n" + "\n\n".join(history_snippets[-2:]) + "\n\n"
+
         # Prepare prompt for LLM with rich context and structure, including diff summary if available
-        prompt = f"""Generate a single semantic commit message for these changes following the Conventional Commits specification.
+        prompt = f"""{history_context}Generate a single semantic commit message for these changes following the Conventional Commits specification.
 
 Summary of Changes:
 - Files changed: {file_analysis['stats']['files_changed']}

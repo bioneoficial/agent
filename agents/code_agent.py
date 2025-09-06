@@ -76,6 +76,36 @@ Diretrizes:
             'go': ['testing'],
             'rust': ['cargo-test']
         }
+    
+    def _extract_files_from_memory(self, memory) -> List[str]:
+        """Extract files that have been worked on from conversation memory"""
+        files = []
+        if not memory or not hasattr(memory, 'chat_memory'):
+            return files
+        
+        # Look through memory messages for file operations
+        for msg in memory.chat_memory.messages:
+            content = msg.content.lower()
+            # Look for patterns indicating file operations
+            import re
+            file_patterns = [
+                r'arquivo\s+([\w\./\-_]+\.\w+)',  # arquivo filename.ext
+                r'file\s+([\w\./\-_]+\.\w+)',    # file filename.ext
+                r'criou\s+([\w\./\-_]+\.\w+)',   # criou filename.ext
+                r'created\s+([\w\./\-_]+\.\w+)', # created filename.ext
+                r'editou\s+([\w\./\-_]+\.\w+)',  # editou filename.ext
+                r'edited\s+([\w\./\-_]+\.\w+)',  # edited filename.ext
+                r'([\w\./\-_]+\.\w+)\s+foi\s+criado', # filename.ext foi criado
+                r'([\w\./\-_]+\.\w+)\s+was\s+created' # filename.ext was created
+            ]
+            
+            for pattern in file_patterns:
+                matches = re.findall(pattern, content)
+                for match in matches:
+                    if match not in files:
+                        files.append(match)
+        
+        return files
         
     def can_handle(self, request: str) -> bool:
         """Verifica se este agente pode lidar com a solicitação"""
@@ -137,6 +167,15 @@ Diretrizes:
             >>> agent.process("executar testes em test_calculadora.py")
         """
         request_lower = request.lower()
+        
+        # Extract memory and track files for context awareness
+        memory = context.get("memory") if context else None
+        files_worked_on = self._extract_files_from_memory(memory) if memory else []
+        
+        # Add file context to context dictionary
+        if context is None:
+            context = {}
+        context["files_worked_on"] = files_worked_on
         
         try:
             # Novo: parser estruturado de intenção, substitui heurísticas soltas

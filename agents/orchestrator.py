@@ -3,6 +3,7 @@ from agents.base_agent import BaseAgent
 from agents.git_agent import GitAgent
 from agents.code_agent import CodeAgent
 from agents.chat_agent import ChatAgent
+from langchain.memory import ConversationBufferMemory
 import subprocess
 import shlex
 import os
@@ -18,6 +19,9 @@ class Orchestrator:
             CodeAgent(),  # CodeAgent agora lida com arquivos, testes e código
             ChatAgent()   # ChatAgent para perguntas e solicitações de informação
         ]
+        
+        # Initialize conversation memory for persistent context
+        self.memory = ConversationBufferMemory(return_messages=True)
         
         # Router configuration
         self.router_strategy = os.getenv('GTA_ROUTER', 'llm').lower()
@@ -73,9 +77,20 @@ class Orchestrator:
     def process_request(self, request: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Process a user request by routing to the appropriate agent"""
         
+        # Initialize context with memory
+        if context is None:
+            context = {}
+        context["memory"] = self.memory
+        
         # Check if it's a direct terminal command
         if self._is_terminal_command(request):
-            return self._execute_terminal_command(request)
+            result = self._execute_terminal_command(request)
+            # Save terminal command interactions to memory
+            self.memory.save_context(
+                {"input": request},
+                {"output": result.get("output", "")}
+            )
+            return result
         
         # Detect and run collaboration pipelines before normal routing
         pipeline = self._detect_pipeline(request)
@@ -109,14 +124,25 @@ class Orchestrator:
                             result = agent.process(request, context)
                             result['agent'] = agent.name
                             result['routing'] = routing_result
+                            # Save interaction to memory
+                            self.memory.save_context(
+                                {"input": request},
+                                {"output": result.get("output", "")}
+                            )
                             return result
                         except Exception as e:
-                            return {
+                            error_result = {
                                 "success": False,
                                 "output": f"Error in {agent.name}: {str(e)}",
                                 "agent": agent.name,
                                 "error": str(e)
                             }
+                            # Save error to memory as well
+                            self.memory.save_context(
+                                {"input": request},
+                                {"output": error_result.get("output", "")}
+                            )
+                            return error_result
                 
                 # Medium confidence: apply light heuristics
                 elif confidence >= 0.4:
@@ -127,6 +153,11 @@ class Orchestrator:
                                 result = agent.process(request, context)
                                 result['agent'] = agent.name
                                 result['routing'] = routing_result
+                                # Save interaction to memory
+                                self.memory.save_context(
+                                    {"input": request},
+                                    {"output": result.get("output", "")}
+                                )
                                 return result
                             except Exception as e:
                                 pass  # Fall through to normal routing
@@ -276,6 +307,11 @@ Examples:
                         if agent.can_handle(request):
                             result = agent.process(request, context)
                             result['agent'] = agent.name
+                            # Save interaction to memory
+                            self.memory.save_context(
+                                {"input": request},
+                                {"output": result.get("output", "")}
+                            )
                             return result
                     except Exception as e:
                         pass  # Continue to normal routing
@@ -286,17 +322,34 @@ Examples:
                 try:
                     result = agent.process(request, context)
                     result['agent'] = agent.name
+                    # Save interaction to memory
+                    self.memory.save_context(
+                        {"input": request},
+                        {"output": result.get("output", "")}
+                    )
                     return result
                 except Exception as e:
-                    return {
+                    error_result = {
                         "success": False,
                         "output": f"Error in {agent.name}: {str(e)}",
                         "agent": agent.name,
                         "error": str(e)
                     }
+                    # Save error to memory as well
+                    self.memory.save_context(
+                        {"input": request},
+                        {"output": error_result.get("output", "")}
+                    )
+                    return error_result
         
         # No agent found
-        return self._handle_unclear_request(request)
+        result = self._handle_unclear_request(request)
+        # Save unclear requests to memory as well
+        self.memory.save_context(
+            {"input": request},
+            {"output": result.get("output", "")}
+        )
+        return result
     
     def _detect_pipeline(self, request: str) -> Optional[str]:
         """Detect if the request should trigger a multi-agent pipeline"""
