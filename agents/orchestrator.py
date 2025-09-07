@@ -1,8 +1,9 @@
 from typing import Dict, Any, List, Optional
-from agents.base_agent import BaseAgent
-from agents.git_agent import GitAgent
-from agents.code_agent import CodeAgent
-from agents.chat_agent import ChatAgent
+
+from .base_agent import BaseAgent
+from .chat_agent import ChatAgent
+from .code_agent import CodeAgent
+from .git_agent import GitAgent
 from agents.planner_agent import PlannerAgent
 from agents.workflow_executor import WorkflowExecutor
 from langchain.memory import ConversationBufferMemory
@@ -11,6 +12,10 @@ import shlex
 import os
 import json
 import re
+
+# Perception system imports
+from orchestra.perception.perception_handler import PerceptionHandler, Suggestion
+from orchestra.perception.cli_notifier import CLINotifier, create_perception_cli_integration
 
 class Orchestrator:
     """Main orchestrator that routes requests to appropriate specialized agents"""
@@ -29,6 +34,30 @@ class Orchestrator:
         self.planner_enabled = os.getenv('GTA_PLANNER_ENABLED', '1') == '1'
         self.planner = PlannerAgent() if self.planner_enabled else None
         self.workflow_executor = WorkflowExecutor(self) if self.planner_enabled else None
+        
+        # Initialize perception system
+        self.perception_enabled = os.getenv('GTA_PERCEPTION_ENABLED', '1') == '1'
+        self.perception_handler = None
+        self.cli_notifier = None
+        
+        if self.perception_enabled:
+            try:
+                # Get project root from current working directory
+                project_root = os.getcwd()
+                
+                # Initialize CLI notifier
+                self.cli_notifier = create_perception_cli_integration()
+                
+                # Initialize perception handler with notifier callback
+                self.perception_handler = PerceptionHandler(
+                    project_root=project_root,
+                    suggestion_callback=self._handle_perception_suggestion
+                )
+                
+                print("🧠 Perception system initialized")
+            except Exception as e:
+                print(f"⚠️ Could not initialize perception system: {e}")
+                self.perception_enabled = False
         
         # Router configuration
         self.router_strategy = os.getenv('GTA_ROUTER', 'llm').lower()
@@ -80,6 +109,227 @@ class Orchestrator:
             # Informações
             "man", "info", "date", "cal", "free", "env", "export", "printenv"
         }
+    
+    def _handle_perception_suggestion(self, suggestion: Suggestion):
+        """Handle new perception suggestions from the handler."""
+        if self.cli_notifier:
+            self.cli_notifier.add_suggestion(suggestion)
+    
+    def _is_perception_command(self, request: str) -> bool:
+        """Check if request is a perception system command."""
+        if not request or not request.strip():
+            return False
+        
+        cmd = request.strip().lower()
+        perception_commands = {
+            'a', 'accept', 'd', 'dismiss', 'l', 'list', 'h', 'help', 's', 'show'
+        }
+        
+        # Single letter commands
+        if cmd in perception_commands:
+            return True
+        
+        # Commands with arguments
+        cmd_prefixes = ['accept ', 'dismiss ', 'show ', 'a ', 'd ', 's ']
+        for prefix in cmd_prefixes:
+            if cmd.startswith(prefix):
+                return True
+        
+        return False
+    
+    def _handle_perception_command(self, request: str) -> Dict[str, Any]:
+        """Handle perception system commands."""
+        if not self.cli_notifier:
+            return {
+                "success": False,
+                "output": "Perception system not available",
+                "type": "perception_error"
+            }
+        
+        try:
+            parts = request.strip().split()
+            if len(parts) < 2:
+                return {
+                    "success": False,
+                    "output": "Comando de percepção inválido. Use 'accept', 'dismiss' ou 'show' seguido do ID da sugestão.",
+                    "type": "perception_error"
+                }
+            
+            suggestion_id = parts[1]
+            action = parts[0].lower()
+            return self._handle_perception_suggestion_action(suggestion_id, action)
+        except Exception as e:
+            return {
+                "success": False,
+                "output": f"Error handling perception command: {str(e)}",
+                "type": "perception_error",
+                "error": str(e)
+            }
+    
+    def _handle_perception_suggestion_action(self, suggestion_id: str, action: str) -> Dict[str, Any]:
+        """Handle a specific perception suggestion action."""
+        try:
+            if action == "accept":
+                return self.cli_notifier.accept_suggestion(suggestion_id)
+            elif action == "dismiss":
+                return self.cli_notifier.dismiss_suggestion(suggestion_id)
+            else:
+                return {
+                    "success": False,
+                    "message": f"Ação desconhecida: {action}. Use 'accept' ou 'dismiss'."
+                }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Erro ao processar sugestão {suggestion_id}: {str(e)}"
+            }
+
+    def start_perception(self):
+        """Start the perception system."""
+        if self.perception_enabled and self.perception_handler:
+            self.perception_handler.start()
+            if self.cli_notifier:
+                self.cli_notifier.start()
+    
+    def stop_perception(self):
+        """Stop the perception system."""
+        if self.perception_enabled:
+            if self.perception_handler:
+                self.perception_handler.stop()
+            if self.cli_notifier:
+                self.cli_notifier.stop()
+    
+    def handle_perception_command(self, command: str) -> Dict[str, Any]:
+        """Handle perception-related commands."""
+        if not self.perception_enabled or not self.cli_notifier:
+            return {
+                "success": False,
+                "output": "Perception system not enabled"
+            }
+        
+        result = self.cli_notifier.handle_user_input(command)
+        
+        # If suggestion was accepted, potentially create a plan for it
+        if result.get("status") == "success" and "accepted" in result.get("message", "").lower():
+            suggestion_info = result.get("suggestion", {})
+            actions = suggestion_info.get("actions", [])
+            
+            if actions and self.planner_enabled:
+                # Create a plan for the first suggested action
+                action_request = actions[0]
+                try:
+                    plan_result = self._handle_composite_request(action_request, {})
+                    if plan_result.get("success"):
+                        result["plan_created"] = True
+                        result["plan_output"] = plan_result.get("output", "")
+                except Exception as e:
+                    result["plan_error"] = str(e)
+        
+        return {
+            "success": True,
+            "output": result.get("message", "Command processed"),
+            "details": result
+        }
+    
+    def _detect_workflow_command(self, request: str) -> Optional[str]:
+        """Detect workflow control commands."""
+        request_lower = request.lower().strip()
+        
+        # Continue/resume patterns (bilingual)
+        continue_patterns = [
+            r'(?:continue|continuar|resumir|resume).*(?:plan|plano|execution|execução|steps|passos|workflow)',
+            r'(?:plan|plano|execution|execução|steps|passos|workflow).*(?:continue|continuar|resumir|resume)',
+            r'(?:continue|continuar).*(?:executing|executando).*(?:plan|plano)',
+            r'(?:voltar|volta).*(?:executar|execution).*(?:plan|plano)'
+        ]
+        
+        for pattern in continue_patterns:
+            if re.search(pattern, request_lower):
+                return "continue"
+        
+        # List workflows patterns
+        list_patterns = [
+            r'(?:list|listar|mostrar|show).*(?:workflows|planos|plans)',
+            r'(?:workflows|planos|plans).*(?:active|ativo|ativos|available|disponível|disponiveis)',
+            r'(?:what|quais|que).*(?:workflows|planos|plans).*(?:running|executando|active|ativo)'
+        ]
+        
+        for pattern in list_patterns:
+            if re.search(pattern, request_lower):
+                return "list"
+        
+        # Resume specific workflow patterns
+        resume_patterns = [
+            r'(?:resume|resumir).*(?:workflow|plano).*([a-f0-9\-]+)',
+            r'(?:continue|continuar).*(?:workflow|plano).*([a-f0-9\-]+)'
+        ]
+        
+        for pattern in resume_patterns:
+            match = re.search(pattern, request_lower)
+            if match:
+                return f"resume:{match.group(1)}"
+        
+        return None
+    
+    def _handle_workflow_command(self, command: str, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle workflow control commands."""
+        
+        if command == "continue":
+            # Try to continue the most recent workflow
+            active_workflows = self.workflow_executor.get_active_workflows()
+            if not active_workflows:
+                return {
+                    "success": False,
+                    "output": "Não há workflows ativos para continuar. Use um comando de planejamento para criar um novo plano.",
+                    "type": "workflow_info"
+                }
+            
+            # Find the most recent incomplete workflow
+            incomplete_workflows = [w for w in active_workflows if "unknown" not in w["progress"]]
+            if incomplete_workflows:
+                latest_workflow = incomplete_workflows[0]  # Assuming sorted by recency
+                return self.workflow_executor.resume_workflow(latest_workflow["id"])
+            else:
+                return {
+                    "success": False,
+                    "output": "Todos os workflows ativos estão completos. Use um comando de planejamento para criar um novo plano.",
+                    "type": "workflow_info"
+                }
+        
+        elif command == "list":
+            # List all active workflows
+            active_workflows = self.workflow_executor.get_active_workflows()
+            if not active_workflows:
+                return {
+                    "success": True,
+                    "output": "Nenhum workflow ativo encontrado.",
+                    "type": "workflow_info",
+                    "workflows": []
+                }
+            
+            output = "📋 Workflows ativos:\n"
+            for i, workflow in enumerate(active_workflows, 1):
+                status_icon = "🔄" if workflow["status"] == "active" else "⏸️"
+                output += f"{i}. {status_icon} {workflow['id'][:8]}... - {workflow['request'][:50]}{'...' if len(workflow['request']) > 50 else ''} [{workflow['progress']}]\n"
+            
+            return {
+                "success": True,
+                "output": output.strip(),
+                "type": "workflow_info",
+                "workflows": active_workflows
+            }
+        
+        elif command.startswith("resume:"):
+            # Resume specific workflow by ID
+            workflow_id = command.split(":", 1)[1]
+            return self.workflow_executor.resume_workflow(workflow_id)
+        
+        else:
+            return {
+                "success": False,
+                "output": f"Comando de workflow desconhecido: {command}",
+                "type": "workflow_error"
+            }
         
     def process_request(self, request: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Process a user request by routing to the appropriate agent"""
@@ -88,6 +338,16 @@ class Orchestrator:
         if context is None:
             context = {}
         context["memory"] = self.memory
+        
+        # Check if it's a perception system command
+        if self.perception_enabled and self.cli_notifier and self._is_perception_command(request):
+            result = self._handle_perception_command(request)
+            # Save perception command interactions to memory
+            self.memory.save_context(
+                {"input": request},
+                {"output": result.get("message", "")}
+            )
+            return result
         
         # Check if it's a direct terminal command
         if self._is_terminal_command(request):
@@ -99,6 +359,26 @@ class Orchestrator:
             )
             return result
         
+        # Check for workflow resume/continue commands
+        if self.planner_enabled and self.workflow_executor:
+            workflow_command = self._detect_workflow_command(request)
+            if workflow_command:
+                try:
+                    result = self._handle_workflow_command(workflow_command, request, context)
+                    # Save interaction to memory
+                    self.memory.save_context(
+                        {"input": request},
+                        {"output": result.get("output", "")}
+                    )
+                    return result
+                except Exception as e:
+                    print(f"⚠️ Erro no comando de workflow: {str(e)}")
+                    return {
+                        "success": False,
+                        "output": f"Erro ao processar comando de workflow: {str(e)}",
+                        "type": "workflow_error"
+                    }
+
         # Check for composite requests that need planning (if planner is enabled)
         if self.planner_enabled and self.planner and not context.get("planned", False):
             if self.planner.is_composite_request(request):

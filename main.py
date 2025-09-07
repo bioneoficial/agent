@@ -51,45 +51,58 @@ def interactive_mode():
     """Run in interactive mode"""
     global orchestrator
     
-    print("Git Terminal Assistant - Multi-Agent Architecture")
-    print("Type 'help' for available commands or 'exit' to quit\n")
-    
-    # Initialize orchestrator
+    global orchestrator
     orchestrator = Orchestrator()
-    # Optional: show router configuration when debug is enabled
-    if os.getenv('GTA_ROUTER_DEBUG') in ('1', 'true', 'True', 'YES', 'yes'):
-        try:
-            print(f"[Router] strategy={orchestrator.router_strategy} threshold={getattr(orchestrator, 'router_threshold', 'n/a')}")
-        except Exception:
-            pass
     
-    while True:
-        try:
-            # Get user input
-            user_input = input("gta> ").strip()
-            
-            # Handle special commands
-            if user_input.lower() in ['exit', 'quit', 'q']:
-                print("Goodbye!")
+    # Start perception system
+    if hasattr(orchestrator, 'start_perception'):
+        orchestrator.start_perception()
+    
+    try:
+        while True:
+            try:
+                user_input = input("\n🔧 gta> ").strip()
+                
+                if not user_input:
+                    continue
+                
+                # Handle built-in commands
+                if user_input.lower() in ['exit', 'quit', 'bye']:
+                    print("👋 Goodbye!")
+                    break
+                elif user_input.lower() == 'help':
+                    show_help()
+                    continue
+                elif user_input.lower() == 'agents':
+                    show_agents()
+                    continue
+                elif user_input.lower().startswith(('suggest', 'perception')):
+                    # Handle perception commands
+                    if hasattr(orchestrator, 'handle_perception_command'):
+                        result = orchestrator.handle_perception_command(user_input)
+                        print_result(result)
+                    else:
+                        print("❌ Perception system not available")
+                    continue
+                
+                # Process the request
+                result = orchestrator.process_request(user_input)
+                print_result(result)
+                
+            except KeyboardInterrupt:
+                print("\n\n👋 Goodbye!")
                 break
-            elif user_input.lower() in ['help', 'h', '?']:
-                show_help()
-                continue
-            elif user_input.lower() == 'agents':
-                show_agents()
-                continue
-            elif not user_input:
-                continue
-            
-            # Process request through orchestrator
-            result = orchestrator.process_request(user_input)
-            print_result(result)
-            print()  # Empty line for readability
-            
-        except KeyboardInterrupt:
-            print("\nUse 'exit' to quit")
-        except Exception as e:
-            print(f"Error: {str(e)}")
+            except Exception as e:
+                print(f"❌ Unexpected error: {e}")
+                # Optionally print stack trace for debugging
+                import traceback
+                if os.getenv('GTA_DEBUG'):
+                    traceback.print_exc()
+    
+    finally:
+        # Stop perception system
+        if hasattr(orchestrator, 'stop_perception'):
+            orchestrator.stop_perception()
 
 def show_agents():
     """Show available agents and their capabilities"""

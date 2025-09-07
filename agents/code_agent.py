@@ -249,14 +249,11 @@ Diretrizes:
             }
     
     def _extract_filename(self, request: str) -> str:
-        """Gera um nome de arquivo baseado na solicitação"""
-        # Padrão para capturar o nome do arquivo após 'chamado' ou 'arquivo' até o final da linha ou próximo marcador
+        """Gera um nome de arquivo semântico usando LLM baseado na solicitação"""
+        # Primeiro, verificar se há menção explícita de arquivo
         patterns = [
-            # Padrão para 'arquivo chamado X' ou 'arquivo X'
             r'(?:arquivo|file)[\s]+(?:chamado[\s]+)?["\']?([a-zA-Z0-9_./\\\-]+\.[a-zA-Z0-9]+)["\']?',
-            # Padrão para 'criar arquivo X' ou 'novo arquivo X'
             r'(?:criar|create|new|novo)[\s]+(?:arquivo|file)[\s]+["\']?([a-zA-Z0-9_./\\\-]+\.[a-zA-Z0-9]+)["\']?',
-            # Padrão para qualquer nome de arquivo com extensão
             r'([a-zA-Z0-9_./\\\-]+\.[a-zA-Z0-9]+)'
         ]
         
@@ -264,78 +261,115 @@ Diretrizes:
             match = re.search(pattern, request, re.IGNORECASE)
             if match:
                 filename = match.group(1).strip()
-                # Remove caracteres inválidos
                 filename = re.sub(r'[^a-zA-Z0-9_./\\\-\.]', '', filename)
                 filename = os.path.normpath(filename)
                 if filename:
                     return filename
         
-        # Se não encontrou, inferir a extensão e diretório a partir da linguagem e intenção
+        # Se não há menção explícita, usar LLM para gerar nome semântico
+        return self._generate_semantic_filename(request)
+    
+    def _generate_semantic_filename(self, request: str) -> str:
+        """Usa LLM para gerar nome de arquivo semântico baseado na funcionalidade."""
+        # Detectar linguagem/extensão
+        extension = self._infer_extension(request)
+        
+        # Detectar diretório se mencionado
+        dir_name = self._infer_directory(request)
+        
+        # Usar LLM para gerar nome base semântico
+        prompt = f"""Based on this request, suggest a meaningful, semantic filename (base name only, no extension):
+
+Request: "{request}"
+
+Requirements:
+- Extract the main purpose/functionality from the request
+- Use snake_case format (e.g., "user_manager", "imc_calculator")  
+- Be descriptive but concise (2-3 words max)
+- Support both Portuguese and English requests
+- If it's a calculator, use "X_calculator" format
+- If it's a manager/handler, use "X_manager" format
+- If it's a list/collection, use "X_list" format
+
+Examples:
+- "calculate IMC" → "imc_calculator"
+- "user management" → "user_manager" 
+- "todo list app" → "todo_list"
+- "password generator" → "password_generator"
+- "email sender" → "email_sender"
+
+Return ONLY the base filename, nothing else:"""
+        
+        try:
+            response = self.invoke_llm(prompt, temperature=0.3)
+            base_name = response.strip().lower()
+            
+            # Sanitizar resposta
+            base_name = re.sub(r'[^a-zA-Z0-9_\-]', '', base_name)
+            base_name = base_name[:50] or 'main'  # Limite de tamanho
+            
+            # Debug logging
+            print(f"🔍 LLM gerou nome: '{response.strip()}' -> sanitizado: '{base_name}'")
+            
+        except Exception as e:
+            print(f"Erro ao gerar nome semântico: {e}")
+            # Fallback para nome baseado em tokens importantes
+            base_name = self._extract_meaningful_tokens(request)
+            print(f"🔄 Usando fallback: '{base_name}'")
+        
+        # Montar caminho final
+        if dir_name:
+            return f"{dir_name}/{base_name}.{extension}"
+        else:
+            return f"{base_name}.{extension}"
+    
+    def _infer_extension(self, request: str) -> str:
+        """Infere a extensão do arquivo baseada na linguagem mencionada."""
         req_lower = request.lower()
         
-        # 1) Extensão explícita mencionada no texto (".py", ".js", etc.)
-        extension = None
+        # Extensão explícita mencionada
         known_exts = ['html', 'css', 'js', 'py', 'java', 'rb', 'go', 'rs', 'php', 'ts', 'jsx', 'tsx', 'json', 'yaml', 'toml', 'ini', 'md', 'sql']
         for ext in known_exts:
             if f'.{ext}' in req_lower:
-                extension = ext
-                break
+                return ext
         
-        # 2) Inferir extensão pela linguagem citada (ex.: "python" -> "py")
-        if not extension:
-            for lang, ext in self.lang_extensions.items():
-                # Ignora mapeamentos que não são extensões de arquivo típicas (ex.: Dockerfile/Makefile)
-                if not isinstance(ext, str) or not re.match(r'^[a-z0-9]{1,5}$', str(ext)):
-                    continue
-                # Usa bordas de palavra para evitar corresponder 'r' em 'rodar', 'go' em 'governance', etc.
-                pattern = r'(?<![a-z0-9])' + re.escape(lang) + r'(?![a-z0-9])'
-                if re.search(pattern, req_lower):
-                    extension = ext
-                    break
+        # Inferir pela linguagem
+        for lang, ext in self.lang_extensions.items():
+            if not isinstance(ext, str) or not re.match(r'^[a-z0-9]{1,5}$', str(ext)):
+                continue
+            pattern = r'(?<![a-z0-9])' + re.escape(lang) + r'(?![a-z0-9])'
+            if re.search(pattern, req_lower):
+                return ext
         
-        # 3) Detectar intenção de diretório (ex.: "create a directory named poc")
-        dir_name = None
+        return 'py'  # Default para Python
+    
+    def _infer_directory(self, request: str) -> str:
+        """Detecta se há menção de diretório específico."""
+        req_lower = request.lower()
         dir_patterns = [
             r'(?:criar|create|make|mkdir)[^a-z0-9]+(?:diret[óo]rio|pasta|folder|directory)[^a-z0-9]+(?:chamado|named)?[^a-z0-9]+([a-zA-Z0-9_\-]+)',
             r'(?:diret[óo]rio|pasta|folder|directory)[^a-z0-9]+(?:chamado|named)?[^a-z0-9]+([a-zA-Z0-9_\-]+)'
         ]
-        for dpat in dir_patterns:
-            dmatch = re.search(dpat, req_lower, re.IGNORECASE)
-            if dmatch:
-                dir_name = re.sub(r'[^a-zA-Z0-9_\-]', '', dmatch.group(1))
-                break
         
-        # 4) Definir um nome base razoável quando apenas descrição é dada
-        #    Inferir dinamicamente a partir do texto (sem palavras genéricas)
-        base = 'main'
+        for pattern in dir_patterns:
+            match = re.search(pattern, req_lower, re.IGNORECASE)
+            if match:
+                return re.sub(r'[^a-zA-Z0-9_\-]', '', match.group(1))
+        return None
+    
+    def _extract_meaningful_tokens(self, request: str) -> str:
+        """Fallback: extrai tokens significativos da solicitação."""
+        req_lower = request.lower()
         tokens = re.findall(r'[a-zA-Z0-9_]+', req_lower)
-        stop = {
-            'create','criar','make','mkdir','new','novo','generate','gerar','write','escrever','build','construir',
-            'file','arquivo','code','código','program','programa','script','project','projeto','module','módulo',
-            'directory','diretório','folder','pasta','named','chamado','inside','dentro','it','ele','ela','and','e',
-            'a','an','um','uma','the','o','os','as','in','em','for','para','with','com','of','de','do','da',
-            'basic','básico','simple','simples','app','application','service','server'
+        
+        stop_words = {
+            'create','criar','make','new','novo','generate','gerar','write','escrever','build',
+            'file','arquivo','code','código','program','programa','script','project','projeto',
+            'a','an','um','uma','the','o','os','as','in','em','for','para','with','com','that','que'
         }
-        # Remover linguagens e extensões conhecidas do conjunto de candidatos
-        langs = set(list(self.lang_extensions.keys()) + list(set([str(v) for v in self.lang_extensions.values() if isinstance(v, str)])))
-        langs.update({'js','ts','py','rb','rs','go','java','php','json','yaml','toml','ini','md','sql','html','css'})
-        candidates = [t for t in tokens if t not in stop and t not in langs]
-        if dir_name:
-            candidates = [t for t in candidates if t != dir_name]
-        if candidates:
-            base = re.sub(r'[^a-zA-Z0-9_\-]', '', candidates[-1])[:50] or 'main'
         
-        # 5) Fallback de extensão
-        if not extension:
-            extension = 'txt'
-        
-        # 6) Montar caminho final
-        if dir_name:
-            return f"{dir_name}/{base}.{extension}"
-        else:
-            # Caso nenhum diretório tenha sido fornecido, ainda assim gerar um nome estável
-            timestamp = str(int(time.time()))[-6:]
-            return f"{base}_{timestamp}.{extension}"
+        candidates = [t for t in tokens if t not in stop_words and len(t) > 2]
+        return candidates[-1] if candidates else 'main'
     
     def _generate_code_content(self, request: str, filename: str) -> str:
         """Generate code content based on request"""

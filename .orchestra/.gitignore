@@ -1,0 +1,4 @@
+# Orchestra reasoning traces
+runs/
+*.log
+temp/

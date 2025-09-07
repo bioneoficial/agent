@@ -86,6 +86,87 @@ O sistema utiliza uma arquitetura de agentes especializados, otimizada para efic
 - Ajuda com documentação e boas práticas
 - Suporte a tarefas gerais de desenvolvimento
 
+## Sistema de Raciocínio Estruturado (Chain-of-Thought)
+
+O GTA inclui um sistema avançado de raciocínio estruturado que permite planejamento multi-etapas com análise contextual e rastreabilidade completa.
+
+### Características do Sistema CoT
+
+- **Planejamento Estruturado**: Decomposição automática de tarefas complexas em etapas executáveis
+- **Validação JSON**: Esquemas Pydantic para garantir consistência e validação de dados
+- **Rastreamento de Execução**: Logs detalhados de cada etapa com pré/pós-condições
+- **Análise de Riscos**: Identificação proativa de possíveis problemas e mitigações
+- **Recuperação de Erros**: Estratégias de fallback e reexecução inteligente
+
+### Modos de Raciocínio
+
+Configuráveis via `GTA_REASONING_MODE`:
+
+1. **`none`** - Sem raciocínio estruturado, apenas saída final
+2. **`brief`** - Plano simplificado com 3-7 etapas principais  
+3. **`structured`** - Trace JSON completo com validação (recomendado)
+
+### Armazenamento de Traces
+
+Os traces de raciocínio são salvos em `.orchestra/runs/` com:
+- Metadados da execução
+- Logs detalhados por etapa
+- Contexto e decisões tomadas
+- Métricas de performance
+
+## Sistema de Percepção Proativa
+
+O sistema de percepção monitora continuamente o projeto e gera sugestões contextuais inteligentes.
+
+### Monitoramento Automático
+
+- **Filesystem Watcher**: Detecta mudanças em arquivos e diretórios
+- **Git Watcher**: Monitora status do repositório, commits e conflitos
+- **Análise Contextual**: Identifica padrões e oportunidades de melhoria
+
+### Tipos de Sugestões
+
+1. **Qualidade de Código**: Refatoração, duplicação, padrões de design
+2. **Workflow Git**: Commits grandes, conflitos, branching
+3. **Testes**: Cobertura, automação, frameworks de teste
+4. **Documentação**: README, comentários, APIs
+5. **Segurança**: Arquivos sensíveis, secrets, permissões
+
+### Interação com Sugestões
+
+```bash
+# Listar sugestões ativas
+gta> list
+
+# Aceitar uma sugestão
+gta> accept perception_1_1234567890
+
+# Rejeitar uma sugestão  
+gta> dismiss perception_2_1234567891
+
+# Ver detalhes
+gta> show perception_1_1234567890
+
+# Ajuda com comandos
+gta> help
+```
+
+### Configuração da Percepção
+
+```bash
+# Ativar/desativar sistema
+GTA_PERCEPTION_ENABLED=1
+
+# Intervalo entre sugestões (segundos)
+GTA_PERCEPTION_COOLDOWN=300
+
+# Modo silencioso
+GTA_PERCEPTION_SILENT=0
+
+# Máximo de sugestões simultâneas
+GTA_PERCEPTION_MAX_CONCURRENT=3
+```
+
 ## Instalação
 
 Esta seção cobre Linux, macOS e Windows. Veja também `docs/LLM_PROVIDERS.md` para configurar provedores LLM (OpenAI, Anthropic, Google, Cohere, Azure, Ollama).

@@ -4,6 +4,8 @@ Analyzes requests and conversation memory to decompose complex tasks into sequen
 """
 
 import re
+import os
+import json
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -12,6 +14,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 
 from .base_agent import BaseAgent
+from orchestra.schemas.reasoning import (
+    ThoughtTrace, ThoughtStep, BriefPlan, ReasoningMode, 
+    ActionType, RiskLevel, Risk, DecisionCriterion
+)
+from orchestra.utils.json_tools import parse_json_with_retry, force_json
+from orchestra.utils.trace_storage import TraceStorage
 
 
 class TaskType(Enum):
@@ -80,14 +88,101 @@ Considere o histórico de conversação para entender o contexto e evitar tarefa
         
         super().__init__("PlannerAgent", system_prompt, llm)
 
-        # Patterns for detecting composite requests
+        # Initialize reasoning configuration
+        self.reasoning_mode = ReasoningMode(os.getenv('GTA_REASONING_MODE', 'structured'))
+        self.reasoning_enabled = os.getenv('GTA_REASONING_ENABLED', '1') == '1'
+        self.save_traces = os.getenv('GTA_SAVE_TRACES', '1') == '1'
+        
+        # Initialize trace storage
+        self.trace_storage = TraceStorage() if self.save_traces else None
+
+        # Composite request indicators (Portuguese and English)
         self.composite_indicators = [
-            r'\be\s+(?:depois|então|em seguida)',  # "e depois", "e então"
-            r'(?:depois|então|em seguida)\s+(?:de\s+)?',  # "depois de", "então"
-            r'(?:primeiro|antes)\s+.*(?:depois|então)',  # "primeiro... depois"
-            r'(?:criar|gerar|fazer).*(?:e|,).*(?:testar|commit|rodar)',  # "criar... e testar"
-            r'(?:editar|modificar).*(?:e|,).*(?:commit|salvar)',  # "editar... e commit"
+            # Portuguese patterns
+            r'criar.*(?:com|e|mais).*(?:test|doc|estrutura)',
+            r'fazer.*(?:projeto|módulo|sistema).*(?:com|e|incluir)',
+            r'desenvolver.*(?:completo|com|incluindo)',
+            r'implementar.*(?:com|incluindo|e).*(?:test|doc)',
+            r'configurar.*(?:projeto|sistema).*(?:com|incluindo)',
+            r'preparar.*(?:ambiente|projeto).*(?:com|para)',
+            # English patterns
+            r'create.*(?:with|and|plus).*(?:test|doc|structure)',
+            r'make.*(?:project|module|system).*(?:with|and|include)',
+            r'develop.*(?:complete|with|including)',
+            r'implement.*(?:with|including|and).*(?:test|doc)',
+            r'configure.*(?:project|system).*(?:with|including)',
+            r'prepare.*(?:environment|project).*(?:with|for)',
+            r'build.*(?:with|and|including).*(?:test|doc)',
+            r'setup.*(?:with|and|including)',
+            r'generate.*(?:with|and|including)'
         ]
+
+        # Structured reasoning prompt template
+        self.STRUCTURED_PLAN_PROMPT = """Goal: "{goal}"
+
+Context Information:
+- Recent conversation history: {history}
+- Repository state: {repo_state}
+- Available agents: CodeAgent (files/tests/analysis), GitAgent (version control), ChatAgent (explanations)
+
+Create a detailed execution plan as valid JSON matching this schema:
+{{
+    "goal": "string - main objective",
+    "assumptions": ["list of assumptions made"],
+    "plan": [
+        {{
+            "id": "step_1",
+            "action": "create_file|edit_file|run_tests|git_commit|etc",
+            "target": "filename or entity",
+            "details": "specific implementation details", 
+            "preconditions": ["what must be true before this step"],
+            "postconditions": ["what will be true after this step"],
+            "estimated_duration": "time estimate",
+            "confidence_level": 0.8
+        }}
+    ],
+    "risks": [
+        {{
+            "description": "potential issue",
+            "level": "low|medium|high|critical",
+            "mitigation": "how to handle this risk",
+            "affected_steps": ["step_ids"]
+        }}
+    ],
+    "decision_criteria": [
+        {{
+            "description": "criteria for success",
+            "weight": 0.8,
+            "measurable": true
+        }}
+    ],
+    "context_summary": "brief context summary",
+    "overall_confidence": 0.8,
+    "complexity_score": 5,
+    "estimated_total_time": "total time estimate"
+}}
+
+Requirements:
+- Prefer small, safe, atomic steps
+- Include realistic preconditions and postconditions
+- Identify genuine risks and mitigations
+- Ensure steps have clear dependencies
+- Return ONLY valid JSON, no additional text"""
+
+        self.BRIEF_PLAN_PROMPT = """Create a simple 3-7 step plan for: "{goal}"
+
+Context: {history}
+
+Return JSON:
+{{
+    "goal": "{goal}",
+    "steps": ["step 1", "step 2", "step 3"],
+    "next_action": "immediate next step",
+    "confidence": 0.8,
+    "estimated_time": "time estimate"
+}}
+
+Return ONLY valid JSON."""
         
         # Task detection patterns
         self.task_patterns = {
@@ -175,62 +270,316 @@ Considere o histórico de conversação para entender o contexto e evitar tarefa
         
         return files
 
+    def create_structured_reasoning(self, goal: str, history: str, repo_state: str) -> Optional[ThoughtTrace]:
+        """Create structured reasoning trace using CoT."""
+        if not self.reasoning_enabled or self.reasoning_mode == ReasoningMode.NONE:
+            return None
+            
+        try:
+            if self.reasoning_mode == ReasoningMode.BRIEF:
+                return self._create_brief_plan(goal, history, repo_state)
+            elif self.reasoning_mode == ReasoningMode.STRUCTURED:
+                return self._create_structured_plan(goal, history, repo_state)
+                
+        except Exception as e:
+            print(f"Structured reasoning failed: {e}")
+            return None
+    
+    def _create_structured_plan(self, goal: str, history: str, repo_state: str) -> ThoughtTrace:
+        """Create detailed structured reasoning trace."""
+        prompt = self.STRUCTURED_PLAN_PROMPT.format(
+            goal=goal,
+            history=history,
+            repo_state=repo_state
+        )
+        
+        # Try to get structured JSON response
+        response = self.invoke_llm(prompt, temperature=0.2)
+        
+        # Parse response with retry logic
+        trace_data = parse_json_with_retry(response, ThoughtTrace, max_retries=3)
+        
+        if isinstance(trace_data, ThoughtTrace):
+            # Save trace if enabled
+            if self.trace_storage:
+                run_id = self.trace_storage.save_trace(trace_data)
+                print(f"💾 Saved reasoning trace to run {run_id}")
+            return trace_data
+        else:
+            # Fallback: create trace from parsed dict
+            return self._create_trace_from_dict(goal, trace_data)
+    
+    def _create_brief_plan(self, goal: str, history: str, repo_state: str) -> ThoughtTrace:
+        """Create simplified reasoning trace."""
+        prompt = self.BRIEF_PLAN_PROMPT.format(goal=goal, history=history)
+        
+        response = self.invoke_llm(prompt, temperature=0.3)
+        brief_data = parse_json_with_retry(response, BriefPlan, max_retries=2)
+        
+        if isinstance(brief_data, BriefPlan):
+            return self._convert_brief_to_trace(brief_data)
+        else:
+            return self._create_fallback_trace(goal, brief_data)
+    
+    def _convert_brief_to_trace(self, brief: BriefPlan) -> ThoughtTrace:
+        """Convert brief plan to full ThoughtTrace."""
+        steps = []
+        for i, step_desc in enumerate(brief.steps):
+            step = ThoughtStep(
+                id=f"brief_{i+1}",
+                action=self._infer_action_type(step_desc),
+                details=step_desc,
+                confidence_level=brief.confidence
+            )
+            steps.append(step)
+        
+        return ThoughtTrace(
+            goal=brief.goal,
+            reasoning_mode=ReasoningMode.BRIEF,
+            plan=steps,
+            next_action=brief.next_action,
+            overall_confidence=brief.confidence,
+            complexity_score=min(len(brief.steps), 10),
+            estimated_total_time=brief.estimated_time
+        )
+    
+    def _infer_action_type(self, description: str) -> ActionType:
+        """Infer action type from description."""
+        desc_lower = description.lower()
+        
+        if any(word in desc_lower for word in ['criar', 'gerar', 'arquivo']):
+            return ActionType.CREATE_FILE
+        elif any(word in desc_lower for word in ['editar', 'modificar', 'alterar']):
+            return ActionType.EDIT_FILE  
+        elif 'test' in desc_lower:
+            if any(word in desc_lower for word in ['executar', 'rodar']):
+                return ActionType.RUN_TESTS
+            else:
+                return ActionType.GENERATE_TESTS
+        elif 'commit' in desc_lower:
+            return ActionType.GIT_COMMIT
+        elif any(word in desc_lower for word in ['explicar', 'descrever']):
+            return ActionType.EXPLAIN_CONCEPT
+        else:
+            return ActionType.CREATE_FILE
+    
+    def _create_trace_from_dict(self, goal: str, data: Dict[str, Any]) -> ThoughtTrace:
+        """Create ThoughtTrace from dictionary data."""
+        try:
+            # Extract and convert steps
+            steps = []
+            plan_data = data.get('plan', [])
+            
+            for step_data in plan_data:
+                if isinstance(step_data, dict):
+                    step = ThoughtStep(
+                        id=step_data.get('id', f"step_{len(steps)+1}"),
+                        action=ActionType(step_data.get('action', 'create_file')),
+                        target=step_data.get('target'),
+                        details=step_data.get('details', ''),
+                        preconditions=step_data.get('preconditions', []),
+                        postconditions=step_data.get('postconditions', []),
+                        estimated_duration=step_data.get('estimated_duration'),
+                        confidence_level=step_data.get('confidence_level', 0.8)
+                    )
+                    steps.append(step)
+            
+            # Extract risks
+            risks = []
+            for risk_data in data.get('risks', []):
+                if isinstance(risk_data, dict):
+                    risk = Risk(
+                        description=risk_data.get('description', ''),
+                        level=RiskLevel(risk_data.get('level', 'medium')),
+                        mitigation=risk_data.get('mitigation'),
+                        affected_steps=risk_data.get('affected_steps', [])
+                    )
+                    risks.append(risk)
+            
+            # Extract decision criteria
+            criteria = []
+            for crit_data in data.get('decision_criteria', []):
+                if isinstance(crit_data, dict):
+                    criterion = DecisionCriterion(
+                        description=crit_data.get('description', ''),
+                        weight=crit_data.get('weight', 1.0),
+                        measurable=crit_data.get('measurable', False)
+                    )
+                    criteria.append(criterion)
+            
+            return ThoughtTrace(
+                goal=goal,
+                reasoning_mode=self.reasoning_mode,
+                assumptions=data.get('assumptions', []),
+                plan=steps,
+                risks=risks,
+                decision_criteria=criteria,
+                context_summary=data.get('context_summary'),
+                overall_confidence=data.get('overall_confidence', 0.8),
+                complexity_score=data.get('complexity_score', 5),
+                estimated_total_time=data.get('estimated_total_time')
+            )
+            
+        except Exception as e:
+            print(f"Failed to create trace from dict: {e}")
+            return self._create_fallback_trace(goal, data)
+    
+    def _create_fallback_trace(self, goal: str, data: Dict[str, Any]) -> ThoughtTrace:
+        """Create minimal fallback trace when parsing fails."""
+        return ThoughtTrace(
+            goal=goal,
+            reasoning_mode=ReasoningMode.STRUCTURED,
+            assumptions=["Fallback plan created due to parsing issues"],
+            plan=[
+                ThoughtStep(
+                    id="fallback_1",
+                    action=ActionType.CREATE_FILE,
+                    details="Execute user request using heuristic approach",
+                    confidence_level=0.6
+                )
+            ],
+            risks=[
+                Risk(
+                    description="Limited reasoning due to parsing failure",
+                    level=RiskLevel.MEDIUM,
+                    mitigation="Monitor execution carefully"
+                )
+            ],
+            overall_confidence=0.6,
+            complexity_score=3
+        )
+
     def analyze_request_with_llm(self, request: str, memory_context: str) -> TaskPlan:
         """Use LLM to analyze complex requests and create a task plan."""
+        # First, create structured reasoning if enabled
+        repo_state = self._get_repo_state_summary()
+        thought_trace = self.create_structured_reasoning(request, memory_context, repo_state)
         
-        prompt = f"""Analise a seguinte solicitação e crie um plano detalhado de subtarefas:
-
-Solicitação: "{request}"
-
-Contexto da conversa recente:
-{memory_context}
-
-Agentes disponíveis:
-1. CodeAgent - criar/editar arquivos, executar/gerar testes, analisar código, gerenciar projetos
-2. GitAgent - operações git, commits semânticos, status do repositório  
-3. ChatAgent - explicações, perguntas, informações
-
-Crie um plano JSON com esta estrutura:
-{{
-    "plan_id": "plan_001",
-    "subtasks": [
-        {{
-            "id": "task_1",
-            "task_type": "file_create",
-            "agent_type": "code",
-            "description": "Criar arquivo main.py com função básica",
-            "parameters": {{"filename": "main.py", "content_type": "python_function"}},
-            "dependencies": []
-        }},
-        {{
-            "id": "task_2", 
-            "task_type": "test_generate",
-            "agent_type": "code",
-            "description": "Gerar testes para a função criada",
-            "parameters": {{"test_file": "test_main.py", "target_file": "main.py"}},
-            "dependencies": ["task_1"]
-        }}
-    ]
-}}
-
-Tipos de tarefa válidos: file_create, file_edit, test_run, test_generate, git_commit, project_setup, chat_explain
-Tipos de agente válidos: code, git, chat
-
-Retorne APENAS o JSON, sem explicações adicionais."""
-
-        try:
-            response = self.invoke_llm(prompt, memory=None, temperature=0.2)
-            # Extract JSON from response
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                import json
-                plan_data = json.loads(json_match.group())
-                return self._create_task_plan_from_dict(request, plan_data)
-        except Exception as e:
-            print(f"LLM analysis failed: {e}")
+        # Convert ThoughtTrace to TaskPlan for backward compatibility
+        if thought_trace:
+            return self._convert_trace_to_task_plan(thought_trace)
         
-        # Fallback to heuristic planning
+        # Fallback to original heuristic planning
         return self._create_heuristic_plan(request)
+    
+    def _get_repo_state_summary(self) -> str:
+        """Get a summary of current repository state."""
+        try:
+            import subprocess
+            import os
+            
+            if not os.path.exists('.git'):
+                return "No git repository detected"
+                
+            # Get basic git status
+            result = subprocess.run(['git', 'status', '--porcelain'], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n') if result.stdout.strip() else []
+                if lines and lines[0]:  # Check if there are actually changes
+                    return f"Git: {len(lines)} modified files"
+                else:
+                    return "Git: Clean working directory"
+            else:
+                return "Git: Status check failed"
+                
+        except Exception as e:
+            return f"Git: Error checking status - {str(e)}"
+    
+    def _convert_trace_to_task_plan(self, trace: ThoughtTrace) -> TaskPlan:
+        """Convert ThoughtTrace to legacy TaskPlan format."""
+        subtasks = []
+        
+        for step in trace.plan:
+            # Map ThoughtStep to SubTask with proper dependency mapping
+            dependencies = []
+            if step.preconditions:
+                # Convert preconditions to step IDs by finding which steps satisfy them
+                for precond in step.preconditions:
+                    for prev_step in trace.plan:
+                        if prev_step == step:
+                            break  # Don't look at current or future steps
+                        if prev_step.postconditions:
+                            # Check if any postcondition matches the precondition
+                            for postcond in prev_step.postconditions:
+                                if self._conditions_match(precond, postcond):
+                                    dependencies.append(prev_step.id)
+                                    break
+            
+            subtask = SubTask(
+                id=step.id,
+                task_type=self._map_action_to_task_type(step.action),
+                agent_type=self._infer_agent_type(step.action),
+                description=step.details or f"Execute {step.action}",
+                parameters={"target": step.target} if step.target else {},
+                dependencies=dependencies  # Proper dependency mapping
+            )
+            subtasks.append(subtask)
+        
+        return TaskPlan(
+            plan_id=trace.id,
+            original_request=trace.goal,
+            subtasks=subtasks,
+            estimated_duration=trace.estimated_total_time
+        )
+    
+    def _conditions_match(self, precondition: str, postcondition: str) -> bool:
+        """Check if a precondition is satisfied by a postcondition."""
+        pre_lower = precondition.lower().strip()
+        post_lower = postcondition.lower().strip()
+        
+        # Direct match
+        if pre_lower == post_lower:
+            return True
+        
+        # File existence patterns
+        if "file exists" in pre_lower and "file exists" in post_lower:
+            # Extract filename from both conditions
+            import re
+            pre_files = re.findall(r'([a-zA-Z0-9_./\-]+\.py|[a-zA-Z0-9_./\-]+\.md)', pre_lower)
+            post_files = re.findall(r'([a-zA-Z0-9_./\-]+\.py|[a-zA-Z0-9_./\-]+\.md)', post_lower)
+            
+            for pre_file in pre_files:
+                for post_file in post_files:
+                    if pre_file == post_file:
+                        return True
+        
+        # Working/complete patterns  
+        if ("working" in pre_lower or "complete" in pre_lower) and ("working" in post_lower or "complete" in post_lower):
+            return True
+        
+        # Test passing patterns
+        if "test" in pre_lower and "pass" in pre_lower and "test" in post_lower and "pass" in post_lower:
+            return True
+        
+        return False
+    
+    def _map_action_to_task_type(self, action: ActionType) -> TaskType:
+        """Map ActionType to legacy TaskType."""
+        mapping = {
+            ActionType.CREATE_FILE: TaskType.FILE_CREATE,
+            ActionType.EDIT_FILE: TaskType.FILE_EDIT,
+            ActionType.RUN_TESTS: TaskType.TEST_RUN,
+            ActionType.GENERATE_TESTS: TaskType.TEST_GENERATE,
+            ActionType.GIT_COMMIT: TaskType.GIT_COMMIT,
+            ActionType.EXPLAIN_CONCEPT: TaskType.CHAT_EXPLAIN,
+            ActionType.CREATE_PROJECT: TaskType.PROJECT_SETUP
+        }
+        return mapping.get(action, TaskType.FILE_CREATE)
+    
+    def _infer_agent_type(self, action: ActionType) -> str:
+        """Infer which agent should handle this action."""
+        if action in [ActionType.CREATE_FILE, ActionType.EDIT_FILE, 
+                     ActionType.RUN_TESTS, ActionType.GENERATE_TESTS,
+                     ActionType.ANALYZE_CODE, ActionType.CREATE_PROJECT]:
+            return "code"
+        elif action in [ActionType.GIT_COMMIT, ActionType.GIT_PUSH, ActionType.GIT_STATUS]:
+            return "git"
+        elif action in [ActionType.EXPLAIN_CONCEPT]:
+            return "chat"
+        else:
+            return "code"
 
     def _create_task_plan_from_dict(self, original_request: str, plan_data: Dict) -> TaskPlan:
         """Convert dictionary to TaskPlan object."""
