@@ -149,8 +149,8 @@ class WorkflowExecutor:
             if not agent:
                 raise ValueError(f"Agente não encontrado para tipo: {current_task.agent_type}")
             
-            # Prepare task-specific request
-            task_request = self._prepare_task_request(current_task)
+            # Use task description directly - it contains the natural language request from planner
+            task_request = current_task.description
             
             # Add planning context to prevent recursion
             context = state["context"].copy()
@@ -281,54 +281,43 @@ class WorkflowExecutor:
     def _prepare_task_request(self, task: SubTask) -> str:
         """Convert a SubTask into a request string for the agent."""
         
-        # Task-specific request generation
+        # Always use natural language description from planner - it has the context
+        request = task.description
+        
+        # Only add specific parameters if they exist and would be helpful
         if task.task_type == TaskType.FILE_CREATE:
             filename = task.parameters.get("filename")
-            content_type = task.parameters.get("content_type", "código básico")
-            
-            # If no filename specified, use the task description for semantic naming
-            if not filename:
-                return f"{task.description}"
-            else:
-                return f"criar arquivo {filename} com {content_type}"
+            if filename:
+                request = f"criar arquivo {filename}: {task.description}"
             
         elif task.task_type == TaskType.FILE_EDIT:
             filename = task.parameters.get("filename")
-            modification = task.parameters.get("modification", "modificação")
-            
-            if not filename:
-                return f"{task.description}"
-            else:
-                return f"editar arquivo {filename}: {modification}"
+            if filename:
+                request = f"editar arquivo {filename}: {task.description}"
             
         elif task.task_type == TaskType.TEST_RUN:
             test_file = task.parameters.get("test_file", "")
             if test_file:
-                return f"executar testes do arquivo {test_file}"
-            return "executar todos os testes"
+                request = f"executar testes do arquivo {test_file}"
+            elif "test" not in request.lower():
+                request = f"executar testes: {request}"
             
         elif task.task_type == TaskType.TEST_GENERATE:
             target_file = task.parameters.get("target_file", "")
             if target_file:
-                return f"gerar testes para {target_file}"
-            return "gerar testes"
+                request = f"gerar testes para {target_file}: {task.description}"
+            elif "test" not in request.lower():
+                request = f"gerar testes: {request}"
             
         elif task.task_type == TaskType.GIT_COMMIT:
             message = task.parameters.get("message", "")
             if message:
-                return f"commit com mensagem: {message}"
-            return "gerar commit automático"
+                request = f"commit com mensagem: {message}"
+            else:
+                request = "gerar commit automático"
             
-        elif task.task_type == TaskType.PROJECT_SETUP:
-            project_type = task.parameters.get("project_type", "python")
-            return f"criar estrutura de projeto {project_type}"
-            
-        elif task.task_type == TaskType.CHAT_EXPLAIN:
-            topic = task.parameters.get("topic", task.description)
-            return f"explicar: {topic}"
-            
-        # Fallback to task description
-        return task.description
+        # Return the request (either natural description or enhanced version)
+        return request
 
     def _check_preconditions(self, task: SubTask, state: WorkflowState, trace: ThoughtTrace) -> bool:
         """Check if task preconditions are met."""

@@ -179,7 +179,7 @@ Diretrizes:
         
         try:
             # Novo: parser estruturado de intenção, substitui heurísticas soltas
-            intent = self._parse_request(request)
+            intent = self._parse_request(request, context)
             if intent is None:
                 return {
                     "success": False,
@@ -277,28 +277,31 @@ Diretrizes:
         # Detectar diretório se mencionado
         dir_name = self._infer_directory(request)
         
-        # Usar LLM para gerar nome base semântico
-        prompt = f"""Based on this request, suggest a meaningful, semantic filename (base name only, no extension):
+        # Usar LLM para gerar nome base semântico baseado no contexto da tarefa
+        prompt = f"""You need to extract a meaningful filename from this task description. Focus on WHAT is being created, not HOW.
 
-Request: "{request}"
+Task: "{request}"
 
-Requirements:
-- Extract the main purpose/functionality from the request
-- Use snake_case format (e.g., "user_manager", "imc_calculator")  
-- Be descriptive but concise (2-3 words max)
-- Support both Portuguese and English requests
-- If it's a calculator, use "X_calculator" format
-- If it's a manager/handler, use "X_manager" format
-- If it's a list/collection, use "X_list" format
+Guidelines:
+- Look for specific nouns: calculator, manager, parser, server, etc.
+- Ignore action verbs: create, make, build, generate, etc.
+- Use snake_case: user_auth, data_parser, math_calculator
+- Be specific but concise (1-2 words)
+- For math operations → "calculator"
+- For tests → "test_[subject]"  
+- For documentation → "readme"
+- For main entry points → "main"
 
 Examples:
-- "calculate IMC" → "imc_calculator"
-- "user management" → "user_manager" 
-- "todo list app" → "todo_list"
-- "password generator" → "password_generator"
-- "email sender" → "email_sender"
+"Create a calculator with basic math functions" → calculator
+"Build a user authentication system" → user_auth  
+"Make a data parser for CSV files" → csv_parser
+"Create main calculator Python file with functions" → calculator
+"Generate unit tests for calculator functions" → test_calculator
+"Create README documentation" → readme
+"Build a simple math calculator" → calculator
 
-Return ONLY the base filename, nothing else:"""
+Extract the core functionality name (base only, no extension):"""
         
         try:
             response = self.invoke_llm(prompt, temperature=0.3)
@@ -420,51 +423,97 @@ Return ONLY the code content, nothing else:"""
         p = path.lower()
         return bool(re.search(r'(?:^|/)(?:test_[^/]+\.py|[^/]+_test\.py|[^/]+_spec\.py|[^/]+\.(?:test|spec)\.(?:js|ts))$', p))
 
-    def _parse_request(self, request: str) -> Optional['CodeAgent.RequestIntent']:
-        """Parser determinístico de intenção a partir do texto do usuário."""
+    def _parse_request(self, request: str, context: Optional[Dict[str, Any]] = None) -> Optional['CodeAgent.RequestIntent']:
+        """Parser inteligente de intenção que compreende linguagem natural."""
         t = (request or '').strip()
         if not t:
             return None
         tl = t.lower()
 
-        # 1) Run tests em arquivo explícito
-        m = re.search(r'(rodar|rode|executar|execute|run)\s+([^\s]+)', tl)
-        if m:
-            candidate = m.group(2)
-            # Normaliza aspas
-            candidate = candidate.strip("'\"")
-            if self._is_test_file_path(candidate):
-                return CodeAgent.RequestIntent('run_tests', [candidate], {})
+        # Check if this is a planned task with specific action context
+        planned = context and context.get('planned', False)
+        task_metadata = context and context.get('task_metadata', {})
+        
+        if planned and task_metadata:
+            # Use the action type from the planner directly
+            task_type = task_metadata.get('task_type')
+            if task_type:
+                # Handle both enum and string task types
+                action_type = str(task_type).lower() if hasattr(task_type, 'value') else str(task_type).lower()
+                
+                if 'file_create' in action_type or 'create_file' in action_type:
+                    return CodeAgent.RequestIntent('create_file', [], {})
+                elif 'file_edit' in action_type or 'edit_file' in action_type:
+                    return CodeAgent.RequestIntent('edit_file', [], {})
+                elif 'test_generate' in action_type or 'generate_tests' in action_type:
+                    return CodeAgent.RequestIntent('generate_tests', [], {})
+                elif 'test_run' in action_type or 'run_tests' in action_type:
+                    return CodeAgent.RequestIntent('run_tests', [], {})
+                elif 'create_project' in action_type:
+                    return CodeAgent.RequestIntent('project_structure', [], {})
 
-        # 2) Run tests (geral)
-        if any(w in tl for w in ['pytest', 'rodar testes', 'executar testes', 'run tests']) or (
-            'testes' in tl and any(v in tl for v in ['rodar', 'rode', 'executar', 'execute', 'run'])
-        ) or tl in {'rodar testes', 'executar testes'}:
+        # Enhanced natural language understanding for various patterns
+        
+        # 1) File creation patterns (broader detection)
+        create_patterns = [
+            r'(criar|create|novo|new|gerar|generate|fazer|make|build)',
+            r'(arquivo|file|código|code|script|programa|program)',
+            r'(calculadora|calculator|função|function|classe|class|módulo|module)'
+        ]
+        
+        if any(re.search(pattern, tl) for pattern in create_patterns[:2]) or \
+           'main' in tl or 'calculator' in tl or 'função' in tl:
+            return CodeAgent.RequestIntent('create_file', [], {})
+
+        # 2) Test generation patterns (enhanced)
+        test_gen_patterns = [
+            r'(gerar|criar|crie|generate|create|fazer|make).*?(teste|test)',
+            r'(teste|test).*?(para|for|de|of)',
+            r'(unit|unittest|pytest).*?(test|teste)',
+            r'comprehensive.*?test'
+        ]
+        
+        if any(re.search(pattern, tl) for pattern in test_gen_patterns):
+            return CodeAgent.RequestIntent('generate_tests', [], {})
+
+        # 3) Test execution patterns
+        test_run_patterns = [
+            r'(rodar|rode|executar|execute|run).*?(teste|test)',
+            r'(teste|test).*?(rodar|run|executar|execute)',
+            r'pytest|unittest|jest|mocha'
+        ]
+        
+        if any(re.search(pattern, tl) for pattern in test_run_patterns):
             return CodeAgent.RequestIntent('run_tests', [], {})
 
-        # 3) Generate tests para um arquivo fonte
-        m = re.search(r'(gerar|criar|crie|generate|create).*?(teste|testes|test).*?(para|de|do|for)\s+([^\s]+\.(py|js|ts))', tl)
-        if m:
-            src = m.group(4).strip("'\"")
-            return CodeAgent.RequestIntent('generate_tests', [src], {})
+        # 4) Documentation patterns
+        doc_patterns = [
+            r'(criar|create|gerar|generate).*?(doc|readme|documentation)',
+            r'(readme|documentation|doc).*?(criar|create|gerar|generate)',
+            r'usage.*?example'
+        ]
+        
+        if any(re.search(pattern, tl) for pattern in doc_patterns):
+            return CodeAgent.RequestIntent('create_file', [], {})
 
-        # 4) Projeto/Estrutura
+        # 5) Project structure patterns
         if any(w in tl for w in ['projeto', 'project', 'estrutura', 'structure']):
             return CodeAgent.RequestIntent('project_structure', [], {})
 
-        # 5) Editar/Ler/Refatorar/Analisar
-        if any(w in tl for w in ['editar', 'edit', 'modificar', 'modify', 'alterar', 'change']):
+        # 6) Edit/modify patterns
+        if any(w in tl for w in ['editar', 'edit', 'modificar', 'modify', 'alterar', 'change', 'update']):
             return CodeAgent.RequestIntent('edit_file', [], {})
+            
+        # 7) Read/show patterns  
         if any(w in tl for w in ['ler', 'read', 'mostrar', 'show', 'exibir', 'display']):
             return CodeAgent.RequestIntent('read_file', [], {})
-        if any(w in tl for w in ['analisar', 'analise', 'analyze', 'review', 'revisar']):
-            return CodeAgent.RequestIntent('analyze', [], {})
-        if any(w in tl for w in ['refatorar', 'refactor', 'melhorar', 'improve']):
-            return CodeAgent.RequestIntent('refactor', [], {})
 
-        # 6) Criar arquivo (explícito)
-        if re.search(r'(criar|create|novo|new|gerar|generate)\s+(arquivo|file)\s+[^\s]+\.[a-z0-9]+', tl):
-            return CodeAgent.RequestIntent('create_file', [], {})
+        # 8) Fallback for planned contexts - try to infer from description
+        if planned:
+            if any(w in tl for w in ['criar', 'create', 'gerar', 'generate', 'fazer', 'make']):
+                return CodeAgent.RequestIntent('create_file', [], {})
+            elif any(w in tl for w in ['test', 'teste']):
+                return CodeAgent.RequestIntent('generate_tests', [], {})
 
         return None
 

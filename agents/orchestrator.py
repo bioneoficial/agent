@@ -379,29 +379,28 @@ class Orchestrator:
                         "type": "workflow_error"
                     }
 
-        # Check for composite requests that need planning (if planner is enabled)
+        # Try planning first for any non-trivial request (let LLM decide what needs planning)
         if self.planner_enabled and self.planner and not context.get("planned", False):
-            if self.planner.is_composite_request(request):
-                try:
-                    # Create task plan
-                    plan_result = self.planner.process(request, context)
-                    if plan_result.get("success") and plan_result.get("plan"):
-                        # Execute the plan using workflow executor
-                        execution_result = self.workflow_executor.execute_plan(
-                            plan_result["plan"], context
-                        )
-                        # Save interaction to memory
-                        self.memory.save_context(
-                            {"input": request},
-                            {"output": execution_result.get("output", "")}
-                        )
-                        return execution_result
-                    else:
-                        # Planning failed, fall back to normal routing
-                        print(f"⚠️ Planejamento falhou, usando roteamento normal: {plan_result.get('output', '')}")
-                except Exception as e:
-                    print(f"⚠️ Erro no sistema de planejamento: {str(e)}, usando roteamento normal")
-                    # Continue to normal routing
+            try:
+                # Let the planner evaluate if this needs multi-step planning
+                plan_result = self.planner.process(request, context)
+                if plan_result.get("success") and plan_result.get("plan"):
+                    # Execute the plan using workflow executor  
+                    execution_result = self.workflow_executor.execute_plan(
+                        plan_result["plan"], context
+                    )
+                    # Save interaction to memory
+                    self.memory.save_context(
+                        {"input": request},
+                        {"output": execution_result.get("output", "")}
+                    )
+                    return execution_result
+                else:
+                    # Not a planning task or planning failed, continue to normal routing
+                    if plan_result.get("output"):
+                        print(f"💭 {plan_result.get('output')}")
+            except Exception as e:
+                print(f"⚠️ Erro no planejamento: {str(e)}, usando roteamento direto")
         
         # Detect and run collaboration pipelines before normal routing
         pipeline = self._detect_pipeline(request)

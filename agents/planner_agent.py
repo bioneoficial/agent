@@ -118,49 +118,30 @@ Considere o histórico de conversação para entender o contexto e evitar tarefa
         ]
 
         # Structured reasoning prompt template
-        self.STRUCTURED_PLAN_PROMPT = """Goal: "{goal}"
+        self.STRUCTURED_PLAN_PROMPT = """Plan how to accomplish: "{goal}"
 
-Context Information:
-- Recent conversation history: {history}
-- Repository state: {repo_state}
-- Available agents: CodeAgent (files/tests/analysis), GitAgent (version control), ChatAgent (explanations)
+Context: {history}
+Repository state: {repo_state}
 
-Create a detailed execution plan as valid JSON matching this schema:
+Break this into simple, clear steps. Each step should be something an intelligent agent can understand and execute naturally.
+
+Generate a JSON plan with this structure:
 {{
-    "goal": "string - main objective",
-    "assumptions": ["list of assumptions made"],
+    "goal": "{goal}",
+    "estimated_total_time": "15 minutes",
     "plan": [
         {{
             "id": "step_1",
-            "action": "create_file|edit_file|run_tests|git_commit|etc",
-            "target": "filename or entity",
-            "details": "specific implementation details", 
-            "preconditions": ["what must be true before this step"],
-            "postconditions": ["what will be true after this step"],
-            "estimated_duration": "time estimate",
-            "confidence_level": 0.8
+            "action": "create_file|edit_file|generate_tests|run_tests|create_project", 
+            "description": "Clear natural language description of what to do",
+            "estimated_time": 5,
+            "preconditions": [],
+            "postconditions": ["What will be true after this step"]
         }}
-    ],
-    "risks": [
-        {{
-            "description": "potential issue",
-            "level": "low|medium|high|critical",
-            "mitigation": "how to handle this risk",
-            "affected_steps": ["step_ids"]
-        }}
-    ],
-    "decision_criteria": [
-        {{
-            "description": "criteria for success",
-            "weight": 0.8,
-            "measurable": true
-        }}
-    ],
-    "context_summary": "brief context summary",
-    "overall_confidence": 0.8,
-    "complexity_score": 5,
-    "estimated_total_time": "total time estimate"
+    ]
 }}
+
+Focus on natural descriptions that explain the intent clearly. Don't specify exact filenames unless critical - let the agents figure out good names.
 
 Requirements:
 - Prefer small, safe, atomic steps
@@ -177,7 +158,7 @@ Return JSON:
 {{
     "goal": "{goal}",
     "steps": ["step 1", "step 2", "step 3"],
-    "next_action": "immediate next step",
+    "next_action": "immediate next step", 
     "confidence": 0.8,
     "estimated_time": "time estimate"
 }}
@@ -225,26 +206,57 @@ Return ONLY valid JSON."""
 
     def can_handle(self, request: str) -> bool:
         """Check if the request appears to be a composite task."""
-        return self.is_composite_request(request)
+        return self._llm_analyze_complexity(request)
     
+    def _llm_analyze_complexity(self, request: str) -> bool:
+        """Use LLM to determine if request needs multi-step planning."""
+        
+        prompt = f"""Should this request be handled with multi-step planning or single agent routing?
+
+Request: "{request}"
+
+Multi-step planning is good for:
+- Projects with multiple files (main code + tests + docs)
+- Tasks that depend on each other sequentially
+- "Create X with Y and Z" type requests
+- Complex workflows
+
+Single agent routing is better for:
+- One specific file creation/edit
+- Simple git commands  
+- Direct questions
+- Single-purpose tasks
+
+Answer only: "PLANNING" or "DIRECT"
+"""
+        
+        try:
+            response = self.invoke_llm(prompt, temperature=0.1)
+            return "PLANNING" in response.upper()
+        except Exception as e:
+            print(f"Erro na análise LLM: {e}")
+            # Default to planning - let LLM decide later if it's not worth it
+            return True
+
     def is_composite_request(self, request: str) -> bool:
-        """Determine if a request contains multiple tasks."""
-        request_lower = request.lower()
+        """
+        Determine if a request requires multi-step planning.
+        Always tries planning first, let LLM decide if it's worth it.
+        """
         
-        # Check for composite indicators
-        for pattern in self.composite_indicators:
-            if re.search(pattern, request_lower):
-                return True
+        # Skip only very obvious single commands
+        request_lower = request.lower().strip()
         
-        # Check for multiple task types
-        detected_tasks = []
-        for task_type, patterns in self.task_patterns.items():
-            for pattern in patterns:
-                if re.search(pattern, request_lower):
-                    detected_tasks.append(task_type)
-                    break
-        
-        return len(detected_tasks) > 1
+        # Skip basic terminal commands
+        if re.match(r'^(ls|pwd|cd|clear|exit|help)(\s|$)', request_lower):
+            return False
+            
+        # Skip simple git status/info commands  
+        if re.match(r'^(git\s+)?(status|log|diff)(\s|$)', request_lower):
+            return False
+            
+        # Everything else goes to planner - let LLM decide
+        return True
 
     def extract_files_from_memory(self, memory) -> List[str]:
         """Extract files that have been worked on from conversation memory."""
