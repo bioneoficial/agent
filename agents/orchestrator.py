@@ -379,12 +379,15 @@ class Orchestrator:
                         "type": "workflow_error"
                     }
 
-        # Try simple LLM-driven execution for complex requests first
+        # Try direct LLM execution first (user's proposed approach) 
         if self._is_complex_request(request):
-            print("🧠 Tentando execução simplificada...")
-            simple_result = self._simple_llm_execution(request, context)
-            if simple_result.get("success"):
-                return simple_result
+            print("🚀 Executando abordagem direta (LLM-driven)...")
+            try:
+                direct_result = self._direct_llm_execution_v2(request, context)
+                if direct_result.get("success"):
+                    return direct_result
+            except Exception as e:
+                print(f"❌ Abordagem direta falhou: {e}")
             
             print("⚠️ Execução simples falhou, usando sistema de planejamento...")
             # Fall back to complex planning system
@@ -939,49 +942,77 @@ Examples:
         
         return any(re.search(pattern, request, re.IGNORECASE) for pattern in complex_indicators)
     
-    def _simple_llm_execution(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    def _direct_llm_execution(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """Execute request using direct LLM planning and execution."""
         
-        prompt = f"""Execute this request step by step: "{request}"
+        prompt = f"""Execute: "{request}"
 
-Return a JSON array with all steps needed. Each step should be:
-{{
-    "step": 1,
-    "action": "create_file|edit_file|run_command",
-    "filename": "semantic_name.py",
-    "content": "complete file content",
-    "command": "command to run", 
-    "description": "what this step does"
-}}
+Generate files with format:
+FILENAME: semantic_name.py
+CONTENT:
+[complete runnable code here]
+---
 
-CRITICAL: Use semantic filenames that reflect the domain entities mentioned in the request.
-Examples: Person → person.py, Calculator → calculator.py, User → user.py
+FILENAME: test_semantic_name.py  
+CONTENT:
+[complete test code here]
+---
 
-Generate complete, runnable code with proper classes, methods, and tests.
-
-Return ONLY the JSON array:"""
+RULES:
+- Use semantic names (Person→person.py, Calculator→calculator.py)
+- Complete runnable code, not snippets
+- Include CRUD operations and comprehensive tests
+- Generate ALL needed files in one response"""
 
         try:
             response = self.base_llm.invoke([{"role": "user", "content": prompt}])
             
-            import json
-            steps = json.loads(response.content)
+            # Parse files from response using FILENAME: markers
+            files_created = []
+            sections = response.content.split('FILENAME:')
             
-            results = []
-            for step in steps:
-                result = self._execute_simple_step(step)
-                results.append(result)
+            for section in sections[1:]:  # Skip first empty section
+                lines = section.strip().split('\n')
+                filename = lines[0].strip()
                 
+                # Find content between CONTENT: and ---
+                content_lines = []
+                in_content = False
+                
+                for line in lines[1:]:
+                    if line.strip() == 'CONTENT:':
+                        in_content = True
+                        continue
+                    elif line.strip() == '---':
+                        break
+                    elif in_content:
+                        content_lines.append(line)
+                
+                if content_lines and filename:
+                    content = '\n'.join(content_lines)
+                    
+                    # Create or edit file
+                    try:
+                        with open(filename, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        
+                        files_created.append(filename)
+                        print(f"✅ Direct: Created {filename}")
+                        
+                    except Exception as e:
+                        print(f"❌ Failed to create {filename}: {e}")
+            
             return {
-                "success": True,
-                "message": f"Executed {len(results)} steps successfully",
-                "steps": results
+                "success": len(files_created) > 0,
+                "message": f"Direct execution created {len(files_created)} files",
+                "files": files_created,
+                "approach": "direct_llm"
             }
             
         except Exception as e:
             return {
                 "success": False,
-                "error": f"Simple execution failed: {str(e)}"
+                "error": f"Direct execution failed: {str(e)}"
             }
     
     def _execute_simple_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
@@ -1020,6 +1051,71 @@ Return ONLY the JSON array:"""
                 return {"success": False, "error": str(e)}
         
         return {"success": True, "message": f"Processed {action}"}
+
+    def _direct_llm_execution_v2(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Implementação correta da sua abordagem direta."""
+        
+        prompt = f'''Execute: "{request}"
+
+Generate files using this exact format:
+
+FILENAME: person.py
+CONTENT:
+class Person:
+    def __init__(self, name, age, gender):
+        self.name = name
+        self.age = age
+        self.gender = gender
+[complete implementation here]
+---
+
+FILENAME: test_person.py
+CONTENT:
+import person
+def test_person():
+    p = person.Person("Alice", 30, "Female")
+    assert p.name == "Alice"
+[complete tests here]
+---
+
+CRITICAL: Use semantic names, complete runnable code, include CRUD operations and tests.'''
+
+        try:
+            messages = [{"role": "user", "content": prompt}]
+            response = self.base_llm.invoke(messages)
+            
+            # Parse usando regex mais robusto
+            import re
+            pattern = r'FILENAME:\s*([^\n]+)\s*\nCONTENT:\s*\n(.*?)(?=---|\Z)'
+            matches = re.findall(pattern, response.content, re.DOTALL)
+            
+            files_created = []
+            for filename, content in matches:
+                filename = filename.strip()
+                content = content.strip()
+                
+                if filename and content:
+                    try:
+                        with open(filename, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        files_created.append(filename)
+                        print(f"✅ Direct: {filename}")
+                    except Exception as e:
+                        print(f"❌ Failed {filename}: {e}")
+            
+            if files_created:
+                return {
+                    "success": True,
+                    "message": f"Abordagem direta criou {len(files_created)} arquivos",
+                    "files": files_created,
+                    "output": f"Arquivos criados: {', '.join(files_created)}",
+                    "type": "direct_execution"
+                }
+            else:
+                return {"success": False, "error": "Nenhum arquivo foi criado"}
+                
+        except Exception as e:
+            return {"success": False, "error": f"Execução direta falhou: {str(e)}"}
 
     def get_agent_capabilities(self) -> Dict[str, List[str]]:
         """Get a summary of what each agent can do"""

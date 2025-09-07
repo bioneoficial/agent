@@ -4,10 +4,10 @@ Analyzes requests and conversation memory to decompose complex tasks into sequen
 """
 
 import re
-import os
 import json
-from typing import Dict, List, Any, Optional, Tuple
-from dataclasses import dataclass
+import os
+from typing import List, Dict, Any, Optional, Union
+from dataclasses import dataclass, field
 from enum import Enum
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -42,10 +42,12 @@ class SubTask:
     """Represents a single subtask in a plan."""
     id: str
     task_type: TaskType
-    agent_type: str  # 'code', 'git', 'chat'
+    agent_type: str
     description: str
-    parameters: Dict[str, Any]
-    dependencies: List[str] = None  # IDs of tasks this depends on
+    dependencies: List[str] = field(default_factory=list)
+    estimated_time: Optional[int] = None
+    postconditions: List[str] = field(default_factory=list)
+    preconditions: List[str] = field(default_factory=list)  # IDs of tasks this depends on
     
     def __post_init__(self):
         if self.dependencies is None:
@@ -155,10 +157,15 @@ Example good descriptions:
 Requirements:
 - Preserve domain entities and business concepts in descriptions
 - Prefer small, safe, atomic steps
+- AVOID duplicate file creation: use edit_file if a file needs modifications
+- Generate unique filenames for different purposes (person.py, test_person.py, etc.)
+- Use edit_file action when adding to existing files
 - Include realistic preconditions and postconditions
 - Identify genuine risks and mitigations
 - Ensure steps have clear dependencies
-- Return ONLY valid JSON, no additional text"""
+- Return ONLY valid JSON, no additional text
+
+CRITICAL: Never generate multiple create_file steps for the same filename. Use edit_file for modifications."""
 
         self.BRIEF_PLAN_PROMPT = """Create a simple 3-7 step plan for: "{goal}"
 
@@ -533,12 +540,14 @@ Answer only: "PLANNING" or "DIRECT"
                 id=step.id,
                 task_type=self._map_action_to_task_type(step.action),
                 agent_type=self._infer_agent_type(step.action),
-                description=step.details or f"Execute {step.action}",
-                parameters={"target": step.target} if step.target else {},
-                dependencies=dependencies  # Proper dependency mapping
+                description=step.details or f"Execute {step.action.value}",
+                dependencies=dependencies,
+                estimated_time=step.estimated_duration,
+                postconditions=step.postconditions or [],
+                preconditions=step.preconditions or []
             )
             subtasks.append(subtask)
-        
+            
         return TaskPlan(
             plan_id=trace.id,
             original_request=trace.goal,

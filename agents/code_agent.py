@@ -277,38 +277,29 @@ Diretrizes:
         # Detectar diretório se mencionado
         dir_name = self._infer_directory(request)
         
+        # Detectar contexto específico (test, main, etc.)
+        context_prefix = self._detect_file_context(request)
+        
         # Usar LLM para gerar nome base semântico baseado no contexto da tarefa
-        prompt = f"""Extract the most important DOMAIN CONCEPT from this task description. Focus on the business entity or main subject, NOT on technical actions.
+        prompt = f"""Extract the domain entity and determine the appropriate filename for this task: "{request}"
 
-Task: "{request}"
+Context Analysis:
+- Is this for tests? Look for: test, testing, generate_tests
+- Is this the main implementation? Look for: create_file, main class
+- Is this for specific functionality? Look for: CRUD, API, service
 
-Domain Extraction Rules:
-1. Look for BUSINESS ENTITIES: Person, User, Product, Order, etc.
-2. Look for FUNCTIONALITY: CRUD, API, Manager, Service, etc.  
-3. Ignore ACTIONS: create, build, make, generate, implement, etc.
-4. Use snake_case format
-5. Be domain-specific, not generic
-
-DOMAIN PATTERNS:
-- "Person CRUD" → person (the entity)
-- "User management system" → user_manager
-- "Product inventory" → product_inventory  
-- "Order processing API" → order_api
-- "Calculator functions" → calculator
-- "Authentication service" → auth_service
-- "Database models" → models
-- "API endpoints" → api
-- "Test suite" → test_[entity]
+Filename Generation Rules:
+1. For TEST files: test_[entity].py → "test_person.py"
+2. For MAIN files: [entity].py → "person.py"  
+3. For specific features: [entity]_[feature].py → "person_crud.py"
 
 Examples:
-"Create a python project with a Person(name,age,gender) CRUD" → person
-"Build User authentication with login/logout" → user_auth
-"Implement Product inventory management" → product_manager
-"Create Order processing system" → order_processor
-"Make Calculator with math operations" → calculator
-"Generate tests for Person class" → test_person
+"create a python project with a Person(name,age,gender) CRUD - file_create" → person
+"create a python project with a Person(name,age,gender) CRUD - generate_tests" → test_person
+"Edit Person class to add CRUD operations" → person
+"Generate tests for Person CRUD functionality" → test_person
 
-Extract the primary domain concept (base name only):"""
+Return ONLY the base filename (without extension):"""
         
         try:
             response = self.invoke_llm(prompt, temperature=0.3)
@@ -373,6 +364,102 @@ Extract the primary domain concept (base name only):"""
                 return re.sub(r'[^a-zA-Z0-9_\-]', '', match.group(1))
         return None
     
+    def _detect_file_context(self, request: str) -> str:
+        """Detecta o contexto do arquivo (test, main, etc.) baseado na request."""
+        req_lower = request.lower()
+        
+        # Contextos de teste
+        test_indicators = ['test', 'testing', 'generate_tests', 'unit_test', 'pytest']
+        if any(indicator in req_lower for indicator in test_indicators):
+            return 'test'
+        
+        # Contextos específicos
+        if 'crud' in req_lower:
+            return 'crud'
+        elif 'api' in req_lower:
+            return 'api'
+        elif 'service' in req_lower:
+            return 'service'
+        
+        # Contexto padrão
+        return 'main'
+    
+    def _generate_filename(self, request: str) -> str:
+        """Gera nome de arquivo baseado na solicitação usando fallbacks inteligentes."""
+        print(f"🔍 Debug: Gerando filename para: '{request}'")
+        
+        return self._generate_intelligent_filename(request)
+    
+    def _generate_intelligent_filename(self, request: str) -> str:
+        """Gera nome de arquivo específico perguntando diretamente ao LLM."""
+        
+        print(f"🔍 Gerando filename específico via LLM para: '{request}'")
+        
+        # Detectar extensão
+        extension = self._infer_extension(request)
+        
+        prompt = f"""Given this specific development task, suggest the MOST APPROPRIATE filename:
+
+Task: "{request}"
+
+Generate a filename that follows these patterns:
+- Main entity class: "person.py"
+- CRUD operations: "personCrud.py" 
+- API/Controller: "personController.py"
+- Service layer: "personService.py"
+- Repository/DAO: "personRepository.py"
+- Manager/Business logic: "personManager.py"  
+- Utilities: "personUtil.py"
+- Tests: "test_person.py"
+
+Consider:
+1. What is the main entity? (Person, User, Product, etc.)
+2. What type of functionality? (class, crud, api, service, repository, test, etc.)
+3. Choose the BEST match from the patterns above
+
+Examples:
+"Create Person class with name, age, gender attributes" → "person"
+"Create PersonCrud class with CRUD operations" → "personCrud"
+"Generate tests for Person class" → "test_person"
+"Create PersonController with REST API" → "personController"
+"Create PersonService with business logic" → "personService"
+"Create PersonRepository for data access" → "personRepository"
+
+Return ONLY the base filename (no extension):"""
+        
+        try:
+            response = self.invoke_llm(prompt, temperature=0.1)
+            filename = response.strip()
+            
+            # Limpar e validar resposta
+            filename = re.sub(r'[^a-zA-Z0-9_]', '', filename)
+            filename = filename[:50] or 'main'
+            
+            print(f"🔍 LLM sugeriu: '{response.strip()}' -> sanitizado: '{filename}'")
+            
+            return f"{filename}.{extension}" if extension else filename
+            
+        except Exception as e:
+            print(f"⚠️ Erro no LLM, usando fallback: {e}")
+            return self._simple_filename_fallback(request, extension)
+    
+    def _simple_filename_fallback(self, request: str, extension: str) -> str:
+        """Fallback simples para quando LLM falha."""
+        req_lower = request.lower()
+        
+        if "test" in req_lower:
+            return f"test_person.{extension}" if extension else "test_person"
+        elif "crud" in req_lower:
+            return f"personCrud.{extension}" if extension else "personCrud"
+        elif "controller" in req_lower or "api" in req_lower:
+            return f"personController.{extension}" if extension else "personController"
+        elif "service" in req_lower:
+            return f"personService.{extension}" if extension else "personService"
+        elif "repository" in req_lower:
+            return f"personRepository.{extension}" if extension else "personRepository"
+        else:
+            return f"person.{extension}" if extension else "person"
+    
     def _extract_meaningful_tokens(self, request: str) -> str:
         """Fallback: extrai tokens significativos da solicitação focando em entidades de domínio."""
         
@@ -387,27 +474,6 @@ Extract the primary domain concept (base name only):"""
             print(f"🔍 Debug: Entidades de domínio: {domain_entities}")
             if domain_entities:
                 return domain_entities[0]
-        
-        # Buscar padrões CRUD mais específicos
-        crud_patterns = [
-            r'(\w+)\s*\([^)]*\)\s*CRUD',  # Person(...) CRUD
-            r'(\w+)\s+CRUD',              # Person CRUD  
-            r'CRUD\s+(\w+)',              # CRUD Person
-            r'(\w+)\s+management',        # User management
-            r'manage\s+(\w+)',           # manage users
-            r'with\s+a\s+(\w+)\s*\(',    # with a Person(
-        ]
-        
-        for pattern in crud_patterns:
-            matches = re.findall(pattern, request, re.IGNORECASE)
-            print(f"🔍 Debug: Pattern '{pattern}' encontrou: {matches}")
-            if matches:
-                entity = matches[0].lower()
-                if entity not in ['create', 'make', 'build', 'generate', 'python', 'project']:
-                    return entity
-        
-        # Buscar substantivos importantes (palavras que não são verbos ou preposições)
-        req_lower = request.lower()
         tokens = re.findall(r'[a-zA-Z0-9_]+', req_lower)
         print(f"🔍 Debug: Todos os tokens: {tokens}")
         

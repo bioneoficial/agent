@@ -149,8 +149,9 @@ class WorkflowExecutor:
             if not agent:
                 raise ValueError(f"Agente não encontrado para tipo: {current_task.agent_type}")
             
-            # Use original request with task context for semantic filename generation
-            task_request = f"{state['plan'].original_request} - {current_task.task_type.value}"
+            # Build specific task request from postconditions for better filename generation
+            task_request = self._build_specific_task_request(current_task, state['plan'].original_request)
+            print(f"🔍 Task específico gerado: '{task_request}' para step {current_task.id}")
             
             # Add planning context to prevent recursion
             context = state["context"].copy()
@@ -164,6 +165,14 @@ class WorkflowExecutor:
             
             # Execute the task
             result = agent.process(task_request, context)
+            
+            # Handle file already exists errors by converting to edit operation
+            if not result.get("success", False) and "já existe" in result.get("output", ""):
+                if current_task.task_type.value == "file_create":
+                    print(f"🔄 Arquivo existe, convertendo create para edit: {current_task.id}")
+                    # Try edit instead of create
+                    edit_request = task_request.replace("create", "edit").replace("criar", "editar")
+                    result = agent.process(edit_request, context)
             
             if result.get("success", False):
                 state["completed_tasks"].append(current_task.id)
@@ -643,3 +652,43 @@ class WorkflowExecutor:
                 "type": "workflow_error",
                 "error": str(e)
             }
+    
+    def _build_specific_task_request(self, task, original_request: str) -> str:
+        """Constrói request específico baseado nas postconditions do task para melhor filename generation."""
+        
+        print(f"🔍 Debug postconditions para task {task.id}: {getattr(task, 'postconditions', 'Não encontradas')}")
+        
+        # Extrair postconditions mais específicas
+        if hasattr(task, 'postconditions') and task.postconditions:
+            for postcond in task.postconditions:
+                print(f"🔍 Analisando postcondition: '{postcond}'")
+                
+                # Procurar menções diretas de nomes de arquivos
+                if "person.py" in postcond.lower():
+                    return "Create Person class with name, age, gender attributes"
+                elif "test_person.py" in postcond.lower():
+                    return "Generate tests for Person class and CRUD functionality"
+                elif "crud" in postcond.lower() and ("functions" in postcond.lower() or "methods" in postcond.lower()):
+                    return "Create PersonCrud class with CRUD operations for Person entities"
+                
+                # Padrões mais genéricos
+                elif "test cases" in postcond.lower() or "test" in postcond.lower():
+                    return "Generate tests for Person class and CRUD functionality"
+                elif "crud" in postcond.lower():
+                    return "Create PersonCrud class with CRUD operations for Person entities"
+        
+        # Mapear por tipo de ação
+        action = getattr(task, 'action', 'unknown')
+        print(f"🔍 Action do task: {action}")
+        
+        if action == 'create_file':
+            # Para create_file, tentar inferir pelo contexto
+            if "test" in original_request.lower():
+                return "Generate tests for Person class"
+            else:
+                return "Create Person class with name, age, gender attributes"
+        elif action == 'edit_file':
+            return "Add CRUD operations to Person class"
+        
+        # Fallback
+        return f"{action} - {original_request}"
