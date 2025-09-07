@@ -379,6 +379,25 @@ class Orchestrator:
                         "type": "workflow_error"
                     }
 
+        # Try simple LLM-driven execution for complex requests first
+        if self._is_complex_request(request):
+            print("🧠 Tentando execução simplificada...")
+            simple_result = self._simple_llm_execution(request, context)
+            if simple_result.get("success"):
+                return simple_result
+            
+            print("⚠️ Execução simples falhou, usando sistema de planejamento...")
+            # Fall back to complex planning system
+            if self.planner.can_handle(request):
+                print("🧠 Request identificado como complexo, iniciando planejamento...")
+                plan_result = self.planner.process(request, context)
+                
+                if plan_result.get("success") and plan_result.get("plan"):
+                    return self.workflow_executor.execute_plan(plan_result["plan"], context)
+                else:
+                    print("⚠️ Falha no planejamento, tentando roteamento direto...")
+                    # Fall through to direct routing
+        
         # Try planning first for any non-trivial request (let LLM decide what needs planning)
         if self.planner_enabled and self.planner and not context.get("planned", False):
             try:
@@ -903,10 +922,105 @@ Examples:
         else:
             return {
                 "success": False,
-                "output": "Não entendi seu pedido. Por favor, seja mais específico ou tente reescrever.",
+                "output": "Não foi possível processar sua solicitação.",
                 "type": "error"
             }
     
+    def _is_complex_request(self, request: str) -> bool:
+        """Check if request needs multi-step execution."""
+        complex_indicators = [
+            r'criar.*(?:projeto|sistema|módulo)',
+            r'gerar.*(?:com|incluindo|e).*(?:test|doc)',
+            r'implementar.*(?:completo|com|incluindo)',
+            r'create.*(?:project|system|with|and)',
+            r'build.*(?:project|with|including)',
+            r'generate.*(?:project|with|tests)'
+        ]
+        
+        return any(re.search(pattern, request, re.IGNORECASE) for pattern in complex_indicators)
+    
+    def _simple_llm_execution(self, request: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute request using direct LLM planning and execution."""
+        
+        prompt = f"""Execute this request step by step: "{request}"
+
+Return a JSON array with all steps needed. Each step should be:
+{{
+    "step": 1,
+    "action": "create_file|edit_file|run_command",
+    "filename": "semantic_name.py",
+    "content": "complete file content",
+    "command": "command to run", 
+    "description": "what this step does"
+}}
+
+CRITICAL: Use semantic filenames that reflect the domain entities mentioned in the request.
+Examples: Person → person.py, Calculator → calculator.py, User → user.py
+
+Generate complete, runnable code with proper classes, methods, and tests.
+
+Return ONLY the JSON array:"""
+
+        try:
+            response = self.base_llm.invoke([{"role": "user", "content": prompt}])
+            
+            import json
+            steps = json.loads(response.content)
+            
+            results = []
+            for step in steps:
+                result = self._execute_simple_step(step)
+                results.append(result)
+                
+            return {
+                "success": True,
+                "message": f"Executed {len(results)} steps successfully",
+                "steps": results
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Simple execution failed: {str(e)}"
+            }
+    
+    def _execute_simple_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a single step from LLM."""
+        
+        action = step.get('action', '')
+        
+        if action == 'create_file':
+            filename = step.get('filename', 'output.py')
+            content = step.get('content', '')
+            
+            try:
+                with open(filename, 'w') as f:
+                    f.write(content)
+                print(f"✅ Created {filename}")
+                return {"success": True, "filename": filename, "action": "created"}
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+        
+        elif action == 'run_command':
+            command = step.get('command', '')
+            
+            try:
+                import subprocess
+                result = subprocess.run(command, shell=True, capture_output=True, text=True, cwd='.')
+                print(f"✅ Executed: {command}")
+                if result.stdout:
+                    print(f"Output: {result.stdout}")
+                
+                return {
+                    "success": result.returncode == 0,
+                    "command": command,
+                    "output": result.stdout
+                }
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+        
+        return {"success": True, "message": f"Processed {action}"}
+
     def get_agent_capabilities(self) -> Dict[str, List[str]]:
         """Get a summary of what each agent can do"""
         capabilities = {}
