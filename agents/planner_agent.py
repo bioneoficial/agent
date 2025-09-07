@@ -133,7 +133,7 @@ Generate a JSON plan with this structure:
         {{
             "id": "step_1",
             "action": "create_file|edit_file|generate_tests|run_tests|create_project", 
-            "description": "Clear natural language description of what to do",
+            "description": "Domain-specific natural language description including key entities and context from the original goal",
             "estimated_time": 5,
             "preconditions": [],
             "postconditions": ["What will be true after this step"]
@@ -141,9 +141,19 @@ Generate a JSON plan with this structure:
     ]
 }}
 
-Focus on natural descriptions that explain the intent clearly. Don't specify exact filenames unless critical - let the agents figure out good names.
+CRITICAL: The "description" field must preserve domain context from the original goal. For example:
+- If goal mentions "Person CRUD", include "Person" in step descriptions
+- If goal mentions "User management", include "User" in step descriptions  
+- If goal mentions "Calculator functions", include "Calculator" in step descriptions
+
+Example good descriptions:
+- "Create Python project structure for Person CRUD system"
+- "Create Person class with name, age, gender attributes"
+- "Create CRUD operations for Person entities"
+- "Generate tests for Person class and CRUD operations"
 
 Requirements:
+- Preserve domain entities and business concepts in descriptions
 - Prefer small, safe, atomic steps
 - Include realistic preconditions and postconditions
 - Identify genuine risks and mitigations

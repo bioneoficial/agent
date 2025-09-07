@@ -149,8 +149,8 @@ class WorkflowExecutor:
             if not agent:
                 raise ValueError(f"Agente não encontrado para tipo: {current_task.agent_type}")
             
-            # Use task description directly - it contains the natural language request from planner
-            task_request = current_task.description
+            # Use original request with task context for semantic filename generation
+            task_request = f"{state['plan'].original_request} - {current_task.task_type.value}"
             
             # Add planning context to prevent recursion
             context = state["context"].copy()

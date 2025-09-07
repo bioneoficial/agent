@@ -278,30 +278,37 @@ Diretrizes:
         dir_name = self._infer_directory(request)
         
         # Usar LLM para gerar nome base semântico baseado no contexto da tarefa
-        prompt = f"""You need to extract a meaningful filename from this task description. Focus on WHAT is being created, not HOW.
+        prompt = f"""Extract the most important DOMAIN CONCEPT from this task description. Focus on the business entity or main subject, NOT on technical actions.
 
 Task: "{request}"
 
-Guidelines:
-- Look for specific nouns: calculator, manager, parser, server, etc.
-- Ignore action verbs: create, make, build, generate, etc.
-- Use snake_case: user_auth, data_parser, math_calculator
-- Be specific but concise (1-2 words)
-- For math operations → "calculator"
-- For tests → "test_[subject]"  
-- For documentation → "readme"
-- For main entry points → "main"
+Domain Extraction Rules:
+1. Look for BUSINESS ENTITIES: Person, User, Product, Order, etc.
+2. Look for FUNCTIONALITY: CRUD, API, Manager, Service, etc.  
+3. Ignore ACTIONS: create, build, make, generate, implement, etc.
+4. Use snake_case format
+5. Be domain-specific, not generic
+
+DOMAIN PATTERNS:
+- "Person CRUD" → person (the entity)
+- "User management system" → user_manager
+- "Product inventory" → product_inventory  
+- "Order processing API" → order_api
+- "Calculator functions" → calculator
+- "Authentication service" → auth_service
+- "Database models" → models
+- "API endpoints" → api
+- "Test suite" → test_[entity]
 
 Examples:
-"Create a calculator with basic math functions" → calculator
-"Build a user authentication system" → user_auth  
-"Make a data parser for CSV files" → csv_parser
-"Create main calculator Python file with functions" → calculator
-"Generate unit tests for calculator functions" → test_calculator
-"Create README documentation" → readme
-"Build a simple math calculator" → calculator
+"Create a python project with a Person(name,age,gender) CRUD" → person
+"Build User authentication with login/logout" → user_auth
+"Implement Product inventory management" → product_manager
+"Create Order processing system" → order_processor
+"Make Calculator with math operations" → calculator
+"Generate tests for Person class" → test_person
 
-Extract the core functionality name (base only, no extension):"""
+Extract the primary domain concept (base name only):"""
         
         try:
             response = self.invoke_llm(prompt, temperature=0.3)
@@ -313,6 +320,12 @@ Extract the core functionality name (base only, no extension):"""
             
             # Debug logging
             print(f"🔍 LLM gerou nome: '{response.strip()}' -> sanitizado: '{base_name}'")
+            
+            # Se o resultado é muito genérico, usar fallback
+            if base_name in ['file', 'project', 'create', 'build', 'make', 'generate', 'main']:
+                print(f"🚨 Nome muito genérico detectado: '{base_name}', usando fallback...")
+                base_name = self._extract_meaningful_tokens(request)
+                print(f"🔄 Fallback resultou em: '{base_name}'")
             
         except Exception as e:
             print(f"Erro ao gerar nome semântico: {e}")
@@ -361,18 +374,53 @@ Extract the core functionality name (base only, no extension):"""
         return None
     
     def _extract_meaningful_tokens(self, request: str) -> str:
-        """Fallback: extrai tokens significativos da solicitação."""
+        """Fallback: extrai tokens significativos da solicitação focando em entidades de domínio."""
+        
+        print(f"🔍 Debug: Extraindo tokens de: '{request}'")
+        
+        # Primeiro, buscar entidades específicas (nomes com maiúsculas) - mais específico
+        entity_matches = re.findall(r'\b([A-Z][a-zA-Z]*)\b', request)
+        print(f"🔍 Debug: Entidades encontradas: {entity_matches}")
+        if entity_matches:
+            # Priorizar entidades de domínio conhecidas, excluindo palavras técnicas
+            domain_entities = [e.lower() for e in entity_matches if e.upper() not in ['CRUD', 'API', 'DB', 'JSON', 'XML', 'HTML', 'CSS', 'JS']]
+            print(f"🔍 Debug: Entidades de domínio: {domain_entities}")
+            if domain_entities:
+                return domain_entities[0]
+        
+        # Buscar padrões CRUD mais específicos
+        crud_patterns = [
+            r'(\w+)\s*\([^)]*\)\s*CRUD',  # Person(...) CRUD
+            r'(\w+)\s+CRUD',              # Person CRUD  
+            r'CRUD\s+(\w+)',              # CRUD Person
+            r'(\w+)\s+management',        # User management
+            r'manage\s+(\w+)',           # manage users
+            r'with\s+a\s+(\w+)\s*\(',    # with a Person(
+        ]
+        
+        for pattern in crud_patterns:
+            matches = re.findall(pattern, request, re.IGNORECASE)
+            print(f"🔍 Debug: Pattern '{pattern}' encontrou: {matches}")
+            if matches:
+                entity = matches[0].lower()
+                if entity not in ['create', 'make', 'build', 'generate', 'python', 'project']:
+                    return entity
+        
+        # Buscar substantivos importantes (palavras que não são verbos ou preposições)
         req_lower = request.lower()
         tokens = re.findall(r'[a-zA-Z0-9_]+', req_lower)
+        print(f"🔍 Debug: Todos os tokens: {tokens}")
         
         stop_words = {
             'create','criar','make','new','novo','generate','gerar','write','escrever','build',
             'file','arquivo','code','código','program','programa','script','project','projeto',
-            'a','an','um','uma','the','o','os','as','in','em','for','para','with','com','that','que'
+            'a','an','um','uma','the','o','os','as','in','em','for','para','with','com','that','que',
+            'python','java','javascript','php','ruby','go','rust','cpp','csharp','execute','run'
         }
         
         candidates = [t for t in tokens if t not in stop_words and len(t) > 2]
-        return candidates[-1] if candidates else 'main'
+        print(f"🔍 Debug: Candidatos finais: {candidates}")
+        return candidates[0] if candidates else 'main'
     
     def _generate_code_content(self, request: str, filename: str) -> str:
         """Generate code content based on request"""
