@@ -824,42 +824,74 @@ Return ONLY the code content, nothing else:"""
                 "truncated": False
             }
         """
-        filename = self._extract_filename(request)
-        if not filename:
-            return {
-                "success": False,
-                "output": "Não foi possível determinar qual arquivo ler.",
-                "type": "file_read"
-            }
-            
-        if not os.path.exists(filename):
-            return {
-                "success": False,
-                "output": f"O arquivo '{filename}' não existe.",
-                "type": "file_read"
-            }
+
+    def _handle_code_request(self, request: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Handle code generation requests with automatic validation."""
+        if context is None:
+            context = {}
             
         try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                content = f.read()
+            # Generate code
+            code_response = self._generate_code(request, context)
+            
+            # Extract filename if not provided in context
+            if "filename" not in context:
+                filename = self._extract_filename(request, code_response)
+            else:
+                filename = context["filename"]
+            
+            # Validate and sanitize filename
+            filename = self._sanitize_filename(filename)
+            
+            # Automatic code validation for Python files
+            validation_result = {"valid": True, "errors": []}
+            if filename.endswith('.py'):
+                validation_result = self._validate_python_code(code_response, filename)
                 
+                # If validation fails, attempt correction
+                if not validation_result["valid"] and context.get("auto_correct", True):
+                    print(f" Validação falhou, tentando correção automática...")
+                    corrected_code = self._attempt_code_correction(code_response, validation_result["errors"], request)
+                    if corrected_code:
+                        # Re-validate corrected code
+                        revalidation = self._validate_python_code(corrected_code, filename)
+                        if revalidation["valid"]:
+                            print(f" Código corrigido e validado com sucesso")
+                            code_response = corrected_code
+                            validation_result = revalidation
+            
+            # Determine action (create or edit)
+            action = context.get("action", "create" if "create" in request.lower() else "edit")
+            
+            if action == "create":
+                result = self._create_file(filename, code_response, request)
+            else:
+                result = self._edit_file(filename, code_response, request)
+            
             return {
                 "success": True,
-                "output": f"Conteúdo de '{filename}':\n\n{content}",
-                "type": "file_read",
+                "output": result["message"],
                 "filename": filename,
-                "content": content,
-                "line_count": len(content.splitlines()),
-                "size_bytes": len(content.encode('utf-8'))
+                "code": code_response,
+                "action": action,
+                "validation": validation_result,
+                "confidence": 0.9 if validation_result["valid"] else 0.6,
+                "metadata": {
+                    "lines_added": result.get("lines_added", 0),
+                    "file_size": result.get("file_size", 0),
+                    "validated": validation_result["valid"],
+                    "validation_errors": validation_result["errors"]
+                }
             }
             
         except Exception as e:
             return {
                 "success": False,
-                "output": f"Erro ao ler o arquivo: {str(e)}",
-                "type": "file_read"
+                "output": f"Erro na geração de código: {str(e)}",
+                "error": str(e),
+                "confidence": 0.1
             }
-    
+
     def _edit_file(self, request: str) -> Dict[str, Any]:
         """Edita um arquivo existente com base na solicitação fornecida.
         
@@ -1896,3 +1928,114 @@ Return ONLY the code content, nothing else:"""
         )
         
         return ''.join(diff)
+    
+    def _validate_python_code(self, code: str, filename: str) -> Dict[str, Any]:
+        """Validate Python code for syntax errors and import issues.
+        
+        Args:
+            code: The Python code to validate
+            filename: The filename for the code
+            
+        Returns:
+            Dict containing validation results with 'valid' boolean and 'errors' list
+        """
+        validation_result = {
+            "valid": True,
+            "errors": [],
+            "warnings": []
+        }
+        
+        try:
+            # Check syntax by compiling the code
+            compile(code, filename, 'exec')
+        except SyntaxError as e:
+            validation_result["valid"] = False
+            validation_result["errors"].append({
+                "type": "syntax_error",
+                "message": str(e),
+                "line": e.lineno,
+                "column": e.offset
+            })
+        except Exception as e:
+            validation_result["valid"] = False
+            validation_result["errors"].append({
+                "type": "compilation_error",
+                "message": str(e)
+            })
+        
+        # Check for common import issues
+        try:
+            import ast
+            tree = ast.parse(code)
+            
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        try:
+                            __import__(alias.name)
+                        except ImportError:
+                            validation_result["warnings"].append({
+                                "type": "import_warning",
+                                "message": f"Module '{alias.name}' may not be available",
+                                "line": node.lineno
+                            })
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        try:
+                            __import__(node.module)
+                        except ImportError:
+                            validation_result["warnings"].append({
+                                "type": "import_warning", 
+                                "message": f"Module '{node.module}' may not be available",
+                                "line": node.lineno
+                            })
+        except Exception:
+            # If AST parsing fails, we already caught it in syntax check
+            pass
+            
+        return validation_result
+    
+    def _attempt_code_correction(self, code: str, errors: List[Dict], original_request: str) -> Optional[str]:
+        """Attempt to automatically correct code based on validation errors.
+        
+        Args:
+            code: The original code with errors
+            errors: List of validation errors
+            original_request: The original user request
+            
+        Returns:
+            Corrected code string or None if correction failed
+        """
+        if not errors:
+            return None
+            
+        try:
+            # Build error description for LLM
+            error_descriptions = []
+            for error in errors:
+                if error["type"] == "syntax_error":
+                    error_descriptions.append(f"Syntax error at line {error.get('line', 'unknown')}: {error['message']}")
+                else:
+                    error_descriptions.append(f"{error['type']}: {error['message']}")
+            
+            correction_prompt = ("You are a Python code assistant. The following code has validation errors that need to be fixed.\n\n"
+                                f"Original request: {original_request}\n\n"
+                                "Code with errors:\n"
+                                f"```python\n{code}\n```\n\n"
+                                "Validation errors found:\n"
+                                f"{chr(10).join(error_descriptions)}\n\n"
+                                "Please provide the corrected Python code. Return ONLY the corrected code without any explanations or markdown formatting.")
+
+            corrected_code = self.invoke_llm(correction_prompt)
+            
+            # Clean up the response (remove potential markdown formatting)
+            if corrected_code.startswith('```python'):
+                corrected_code = corrected_code.replace('```python', '').replace('```', '').strip()
+            elif corrected_code.startswith('```'):
+                corrected_code = corrected_code.replace('```', '').strip()
+                
+            return corrected_code
+            
+        except Exception as e:
+            print(f"⚠️ Erro durante correção automática: {str(e)}")
+            return None

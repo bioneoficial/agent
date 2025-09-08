@@ -15,17 +15,15 @@ from datetime import datetime
 from langgraph.graph import StateGraph, START, END
 
 from .planner_agent import TaskPlan, SubTask, TaskType
-from orchestra.schemas.reasoning import ThoughtTrace, ThoughtStep, ActionType
+from orchestra.schemas import (
+    ReasoningMode, ActionType, ThoughtTrace, ThoughtStep,
+    ReasoningConfig, BriefPlan, TaskResult, TaskStatus, TaskType,
+    ValidationResult, TaskMetadata, ErrorFeedback, ReplanDecision
+)
 from orchestra.utils.trace_storage import TraceStorage
 
 
-# Pydantic Models for Structured Output
-class ReplanDecision(BaseModel):
-    """Decision on whether to replan and how"""
-    needs_replan: bool = Field(description="Whether replanning is needed")
-    reason: str = Field(description="Reason for the decision")
-    confidence: float = Field(description="Confidence in current plan (0-1)")
-    suggested_action: str = Field(description="Suggested next action")
+# Enhanced structured output models are now imported from orchestra.schemas
 
 class ExecutionResult(BaseModel):
     """Structured result from task execution"""
@@ -255,80 +253,39 @@ class WorkflowExecutor:
                         }
             
             # Create structured execution result
-            execution_result = ExecutionResult(
-                success=result.get("success", False),
-                output=result.get("output", ""),
-                confidence=result.get("confidence", 0.8),
-                metadata=result.get("metadata", {}),
-                filename_generated=result.get("filename")
-            )
-            
-            # Store in task results
-            state.task_results[current_task.id] = execution_result
-            
-            # Add to past executions (auto-accumulation)
-            # Safe serialization of execution_result
-            if hasattr(execution_result, '__dataclass_fields__'):
-                execution_record = (current_task.id, asdict(execution_result))
-            else:
-                execution_record = (current_task.id, {
-                    "success": getattr(execution_result, 'success', False),
-                    "output": getattr(execution_result, 'output', ''),
-                    "confidence": getattr(execution_result, 'confidence', 0.8),
-                    "metadata": getattr(execution_result, 'metadata', {}),
-                    "filename_generated": getattr(execution_result, 'filename_generated', None)
-                })
-            
-            print(f"✅ Tarefa {current_task.id} concluída" if execution_result.success 
-                  else f"❌ Falha na tarefa {current_task.id}: {execution_result.output}")
-            
-            # Force termination after executing a reasonable number of tasks
             if current_task.id == "step_9" or state.current_task_index >= 8:
-                print(f"🏁 Workflow finalizado após tarefa {current_task.id}")
-                print(f"✓ Execução híbrida concluída: {len(state.completed_tasks) + 1} tarefas executadas")
-                # Create final completion record
-                final_record = ("workflow_completion", {
-                    "total_tasks": len(state.plan.subtasks),
-                    "completed": len(state.completed_tasks) + 1,
-                    "failed": len(state.failed_tasks),
-                    "success_rate": "100%",
-                    "replanning_count": len(state.replanning_history)
-                })
-                # Return with END signal - this should terminate the workflow
+                print("🏁 Workflow execution completed - final task reached")
                 return {
-                    "past_executions": [execution_record, final_record],
+                    "past_executions": [execution_record],
                     "task_results": {current_task.id: execution_result},
+                    "current_task_index": state.current_task_index + 1,
                     "workflow_complete": True,
-                    "_terminate": True  # Explicit termination signal
+                    "_terminate": True
                 }
-                
+            
+            # Continue with normal execution tracking
+            status = "✅" if execution_result.success else "⚠️"
+            print(f"{status} Tarefa {current_task.id} {'concluída' if execution_result.success else 'executada'}: {execution_result.output[:100]}...")
+            
             return {
                 "past_executions": [execution_record],
-                "task_results": {current_task.id: execution_result}
+                "task_results": {current_task.id: execution_result},
+                "current_task_index": state.current_task_index + 1,
+                "execution_metadata": state.execution_metadata.update({
+                    "total": len(state.plan.subtasks),
+                    "completed": len(state.completed_tasks) + (1 if execution_result.success else 0),
+                    "failed": len(state.failed_tasks) + (0 if execution_result.success else 1),
+                    "success_rate": f"{((len(state.completed_tasks) + (1 if execution_result.success else 0)) / len(state.plan.subtasks) * 100):.1f}%",
+                    "replanning_count": len(state.replanning_history)
+                })
             }
             
         except Exception as e:
-            error_result = ExecutionResult(
-                success=False,
-                output=f"Erro na execução: {str(e)}",
-                confidence=0.0,
-                metadata={"error": str(e), "task_id": current_task.id}
-            )
+            print(f"❌ Erro na execução da tarefa {current_task.id}: {e}")
             
-            state.task_results[current_task.id] = error_result
-            # Safe serialization of error_result
-            if hasattr(error_result, '__dataclass_fields__'):
-                execution_record = (current_task.id, asdict(error_result))
-            else:
-                execution_record = (current_task.id, {
-                    "success": getattr(error_result, 'success', False),
-                    "output": getattr(error_result, 'output', ''),
-                    "confidence": getattr(error_result, 'confidence', 0.0),
-                    "metadata": getattr(error_result, 'metadata', {}),
-                    "filename_generated": getattr(error_result, 'filename_generated', None)
-                })
-            
-            print(f"❌ Erro na tarefa {current_task.id}: {str(e)}")
+            # Create error result with intelligent analysis
+            error_result = self._create_error_execution_result(e, current_task, state)
+            execution_record = (current_task.id, current_task.description, datetime.now())
             
             return {
                 "past_executions": [execution_record],
@@ -366,34 +323,233 @@ class WorkflowExecutor:
         return {}
     
     def _should_replan(self, state: HybridWorkflowState) -> str:
-        """Decide whether to replan, continue, or retry based on current state."""
+        """Enhanced decision-making with structured error analysis."""
         # Check if we're beyond the available tasks
         if state.current_task_index >= len(state.plan.subtasks):
             print(f"🏁 Replanning finalizado - índice {state.current_task_index} >= {len(state.plan.subtasks)}")
-            return "continue"  # Signal to continue to completion check
-            
+            return "continue"
+        
         current_task = state.plan.subtasks[state.current_task_index]
         result = state.task_results.get(current_task.id)
         
-        # Check if we have replan triggers
-        if state.replan_triggers:
-            return "replan"
+        # Use structured decision-making with error feedback
+        decision = self._analyze_replan_decision(state, current_task, result)
         
-        # Check confidence threshold
-        if result and result.confidence < state.confidence_threshold:
+        if decision.should_replan:
+            print(f"🔄 Replanning necessário: {decision.reason}")
             return "replan"
-        
-        # If task failed, decide between retry and replan
-        if result and not result.success:
-            # Simple retry logic: retry once, then replan
-            retry_count = len([r for r in state.past_executions if r[0] == current_task.id])
-            if retry_count < 2:
-                return "retry"
+        elif result and not result.success:
+            # Check if retry is recommended
+            error_feedback = self._create_error_feedback(current_task, result, state)
+            if error_feedback.retry_recommended:
+                retry_count = len([r for r in state.past_executions if r[0] == current_task.id])
+                if retry_count < 2:
+                    print(f"🔁 Tentando novamente: {error_feedback.suggested_fixes}")
+                    return "retry"
+                else:
+                    print(f"🔄 Máximo de tentativas atingido, replanejando")
+                    return "replan"
             else:
                 return "replan"
         
-        # Continue to completion check
         return "continue"
+    
+    def _analyze_replan_decision(self, state: HybridWorkflowState, current_task: SubTask, result: ExecutionResult) -> ReplanDecision:
+        """Analyze whether replanning is needed using structured decision-making."""
+        # Check explicit replan triggers
+        if state.replan_triggers:
+            return ReplanDecision(
+                should_replan=True,
+                reason=f"Explicit triggers: {', '.join(state.replan_triggers)}",
+                confidence=0.9,
+                suggested_changes=["Address triggered issues before continuing"]
+            )
+        
+        # Check confidence threshold
+        if result and result.confidence < state.confidence_threshold:
+            return ReplanDecision(
+                should_replan=True,
+                reason=f"Low confidence: {result.confidence:.2f} < {state.confidence_threshold}",
+                confidence=0.8,
+                suggested_changes=["Review task approach and requirements"]
+            )
+        
+        # Check failure patterns
+        failed_count = len(state.failed_tasks)
+        total_tasks = len(state.plan.subtasks)
+        failure_rate = failed_count / total_tasks if total_tasks > 0 else 0
+        
+        if failure_rate > 0.3:  # More than 30% failure rate
+            return ReplanDecision(
+                should_replan=True,
+                reason=f"High failure rate: {failure_rate:.1%} ({failed_count}/{total_tasks})",
+                confidence=0.85,
+                suggested_changes=["Simplify approach", "Break down complex tasks", "Review prerequisites"]
+            )
+        
+        # No replanning needed
+        return ReplanDecision(
+            should_replan=False,
+            reason="Execution proceeding normally",
+            confidence=0.8,
+            suggested_changes=[]
+        )
+    
+    def _create_error_feedback(self, task: SubTask, result: ExecutionResult, state: HybridWorkflowState) -> ErrorFeedback:
+        """Create structured error feedback for failed tasks."""
+        error_type = "execution_failure"
+        error_message = result.output if result else "Task execution failed"
+        
+        # Analyze error type from output
+        if result and result.output:
+            output_lower = result.output.lower()
+            if "syntax" in output_lower or "syntaxerror" in output_lower:
+                error_type = "syntax_error"
+            elif "import" in output_lower or "modulenotfounderror" in output_lower:
+                error_type = "import_error"
+            elif "permission" in output_lower or "access" in output_lower:
+                error_type = "permission_error"
+            elif "file not found" in output_lower or "filenotfounderror" in output_lower:
+                error_type = "file_error"
+        
+        # Generate suggested fixes based on error type
+        suggested_fixes = []
+        retry_recommended = False
+        
+        if error_type == "syntax_error":
+            suggested_fixes = ["Check code syntax", "Validate Python syntax before execution", "Use automatic code correction"]
+            retry_recommended = True
+        elif error_type == "import_error":
+            suggested_fixes = ["Install missing dependencies", "Check import paths", "Verify module availability"]
+            retry_recommended = True
+        elif error_type == "permission_error":
+            suggested_fixes = ["Check file permissions", "Run with appropriate privileges", "Verify write access"]
+            retry_recommended = False
+        elif error_type == "file_error":
+            suggested_fixes = ["Create missing directories", "Check file paths", "Verify file existence"]
+            retry_recommended = True
+        else:
+            suggested_fixes = ["Review task requirements", "Check execution context", "Validate input parameters"]
+            retry_recommended = len([r for r in state.past_executions if r[0] == task.id]) == 0
+        
+        return ErrorFeedback(
+            error_type=error_type,
+            error_message=error_message,
+            failed_task_id=task.id,
+            context={"task_type": task.task_type, "confidence": result.confidence if result else 0.0},
+            suggested_fixes=suggested_fixes,
+            retry_recommended=retry_recommended
+        )
+    
+    def _execute_with_intelligent_retry(self, task: SubTask, state: HybridWorkflowState, retry_count: int) -> Dict[str, Any]:
+        """Execute task with intelligent retry logic based on previous failures."""
+        print(f"🔁 Tentativa {retry_count + 1} para tarefa {task.id}")
+        
+        # Get previous execution results for this task
+        previous_results = [result for exec_id, result in state.task_results.items() 
+                          if exec_id == task.id]
+        
+        # Analyze previous failures to adjust approach
+        enhanced_context = state.context.copy()
+        
+        if previous_results:
+            last_result = previous_results[-1]
+            if hasattr(last_result, 'output') and last_result.output:
+                # Extract error patterns and adjust context
+                if "syntax" in last_result.output.lower():
+                    enhanced_context["auto_correct"] = True
+                    enhanced_context["validation_strict"] = True
+                elif "import" in last_result.output.lower():
+                    enhanced_context["check_dependencies"] = True
+                elif "file" in last_result.output.lower() and "not found" in last_result.output.lower():
+                    enhanced_context["create_directories"] = True
+                
+                # Add retry-specific instructions
+                enhanced_context["retry_attempt"] = retry_count + 1
+                enhanced_context["previous_error"] = last_result.output
+        
+        # Execute with enhanced context
+        return self.orchestrator.execute_task(task, enhanced_context)
+    
+    def _create_enhanced_execution_result(self, result: Dict[str, Any], task: SubTask, retry_count: int) -> ExecutionResult:
+        """Create enhanced execution result with validation integration."""
+        base_result = ExecutionResult(
+            success=result.get("success", False),
+            output=result.get("output", ""),
+            confidence=result.get("confidence", 0.8),
+            metadata=result.get("metadata", {}),
+            filename_generated=result.get("filename")
+        )
+        
+        # Enhance confidence based on retry count and validation
+        if retry_count > 0:
+            # Lower confidence for retry attempts
+            base_result.confidence = max(0.1, base_result.confidence * (0.8 ** retry_count))
+        
+        # Add validation results if available
+        if "validation" in result:
+            validation_result = result["validation"]
+            if isinstance(validation_result, dict):
+                if not validation_result.get("valid", True):
+                    base_result.confidence = min(base_result.confidence, 0.6)
+                
+                # Add validation metadata
+                base_result.metadata.update({
+                    "validation_performed": True,
+                    "validation_valid": validation_result.get("valid", True),
+                    "validation_errors": len(validation_result.get("errors", [])),
+                    "validation_warnings": len(validation_result.get("warnings", []))
+                })
+        
+        # Add retry metadata
+        if retry_count > 0:
+            base_result.metadata.update({
+                "retry_count": retry_count,
+                "retry_execution": True
+            })
+        
+        return base_result
+    
+    def _create_error_execution_result(self, error: Exception, task: SubTask, state: HybridWorkflowState) -> ExecutionResult:
+        """Create structured error execution result with intelligent analysis."""
+        error_type = type(error).__name__
+        error_message = str(error)
+        
+        # Analyze error for confidence and metadata
+        confidence = 0.1
+        metadata = {
+            "error_type": error_type,
+            "error_category": "unknown"
+        }
+        
+        # Categorize common errors
+        if "Syntax" in error_type or "syntax" in error_message.lower():
+            metadata["error_category"] = "syntax"
+            confidence = 0.2  # Syntax errors are often fixable
+        elif "Import" in error_type or "import" in error_message.lower():
+            metadata["error_category"] = "dependency"
+            confidence = 0.3  # Import errors can be resolved
+        elif "Permission" in error_type or "permission" in error_message.lower():
+            metadata["error_category"] = "permission"
+            confidence = 0.1  # Permission errors are harder to fix automatically
+        elif "FileNotFound" in error_type or "file not found" in error_message.lower():
+            metadata["error_category"] = "file_system"
+            confidence = 0.4  # File system errors are often resolvable
+        
+        # Add context about retry potential
+        retry_count = len([r for r in state.past_executions if r[0] == task.id])
+        metadata.update({
+            "retry_count": retry_count,
+            "max_retries_reached": retry_count >= 2,
+            "recoverable": confidence > 0.2
+        })
+        
+        return ExecutionResult(
+            success=False,
+            output=f"Erro {error_type}: {error_message}",
+            confidence=confidence,
+            metadata=metadata
+        )
     
     def _replan_step(self, state: HybridWorkflowState) -> HybridWorkflowState:
         """Implement dynamic replanning based on execution results."""

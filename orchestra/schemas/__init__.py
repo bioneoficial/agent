@@ -1,7 +1,26 @@
 """
-Schemas for structured reasoning and perception systems.
+Structured schemas for orchestration system.
 """
 
-from .reasoning import ThoughtStep, ThoughtTrace
+from .reasoning import (
+    ReasoningMode,
+    ActionType,
+    RiskLevel,
+    ThoughtStep,
+    Risk,
+    DecisionCriterion,
+    ThoughtTrace,
+    BriefPlan,
+    ReasoningConfig
+)
 
-__all__ = ['ThoughtStep', 'ThoughtTrace']
+from .task_results import (
+    TaskStatus,
+    TaskType,
+    ValidationResult,
+    TaskMetadata,
+    TaskResult,
+    WorkflowResult,
+    ReplanDecision,
+    ErrorFeedback
+)
