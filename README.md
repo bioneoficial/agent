@@ -4,32 +4,69 @@ GTA é um assistente inteligente de terminal que utiliza uma arquitetura multi-a
 
 ## Arquitetura
 
-O sistema utiliza uma arquitetura de agentes especializados, otimizada para eficiência e manutenibilidade. A arquitetura atual foi simplificada para três agentes principais:
+O sistema utiliza uma arquitetura de agentes especializados com um poderoso sistema de workflow híbrido que combina execução direta com planejamento dinâmico. A arquitetura foi projetada para ser robusta, flexível e auto-corretiva.
+
+### Visão Geral do Sistema
 
 ```
-┌─────────────────┐    ┌───────────────────────────────────────┐
-│   Git Agent     │    │            Code Agent                 │
-│                 │    │                                       │
-│ • Git commands  │    │ • File operations (create/edit/read) │
-│ • Commit msgs   │    │ • Test execution & generation       │
-│ • Status/diff   │    │ • Code analysis & refactoring      │
-└─────────────────┘    │ • Project structure management     │
-         │             └───────────────────────────────────────┘
-         │
-         │             ┌──────────────────┐
-         └─────────────┤   Chat Agent     │
-                       │                  │
-                       │ • General Q&A    │
-                       │ • Documentation  │
-                       └──────────────────┘
-                               │
-                      ┌────────┴────────┐
-                      │   Orchestrator   │
-                      │                  │
-                      │ • Route requests │
-                      │ • Handle errors  │
-                      └──────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Hybrid Workflow System                        │
+│                                                                 │
+│  ┌─────────────┐    ┌───────────────────────────────────────┐   │
+│  │  Git Agent  │    │            Code Agent                 │   │
+│  │             │    │                                       │   │
+│  │ • Git cmds  │    │ • File operations (create/edit/read)  │   │
+│  │ • Commit    │    │ • Test execution & generation         │   │
+│  │ • Status    │    │ • Code analysis & refactoring         │   │
+│  └─────────────┘    │ • Project structure management        │   │
+│         │           └───────────────────────────────────────┘   │
+│         │                                                      │
+│         │           ┌──────────────────┐                       │
+│         └───────────┤   Chat Agent     │                       │
+│                     │                  │                       │
+│                     │ • General Q&A    │                       │
+│                     │ • Documentation  │                       │
+│                     └──────────────────┘                       │
+│                             │                                 │
+│                    ┌────────┴────────┐                        │
+│                    │   Orchestrator   │                        │
+│                    │                  │                        │
+│                    │ • Route requests │                        │
+│                    │ • Handle errors  │                        │
+│                    └────────┬────────┘                        │
+│                             │                                 │
+│  ┌───────────────────────────────────────────────────────┐    │
+│  │              Workflow Execution Engine                │    │
+│  │                                                       │    │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌───────────────┐  │    │
+│  │  │  Task       │  │  Validation │  │  Retry &     │  │    │
+│  │  │  Execution  │◄─┤  & Error    │◄─┤  Replanning  │  │    │
+│  │  └─────────────┘  │  Handling   │  │  System      │  │    │
+│  │         ▲         └─────────────┘  └───────┬───────┘  │    │
+│  │         │                    ▲              │          │    │
+│  │         └────────────────────┴──────────────┘          │    │
+│  └───────────────────────────────────────────────────────┘    │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
 ```
+
+### Componentes Principais
+
+1. **Agentes Especializados**
+   - **GitAgent**: Gerencia operações Git e geração de mensagens de commit semânticas
+   - **CodeAgent**: Executa operações de arquivo, testes e análise de código
+   - **ChatAgent**: Fornece respostas a perguntas gerais e documentação
+
+2. **Sistema de Workflow Híbrido**
+   - **Motor de Execução**: Gerencia o fluxo de trabalho e orquestra tarefas
+   - **Validação Automática**: Verifica a validade do código gerado
+   - **Sistema de Repetição Inteligente**: Tenta novamente tarefas com falha com contexto aprimorado
+   - **Replanejamento Dinâmico**: Ajusta o fluxo de trabalho com base nos resultados
+
+3. **Gerenciamento de Estado**
+   - Rastreia o progresso das execuções
+   - Mantém histórico de tentativas e erros
+   - Fornece contexto para decisões de replanejamento
 
 ### Agentes Principais
 
@@ -103,6 +140,47 @@ O GTA inclui um sistema avançado de raciocínio estruturado que permite planeja
 - **Rastreamento de Execução**: Logs detalhados de cada etapa com pré/pós-condições
 - **Análise de Riscos**: Identificação proativa de possíveis problemas e mitigações
 - **Recuperação de Erros**: Estratégias de fallback e reexecução inteligente
+
+## Sistema de Workflow Híbrido
+
+O sistema de workflow híbrido combina a simplicidade do LangGraph com recursos avançados de validação, repetição e replanejamento para execução confiável de tarefas complexas.
+
+### Recursos Principais
+
+- **Validação Automática de Código**
+  - Verificação de sintaxe Python
+  - Validação de importações
+  - Correção automática de erros comuns
+
+- **Repetição Inteligente**
+  - Análise de falhas para determinar a causa raiz
+  - Aprimoramento de contexto para novas tentativas
+  - Limites configuráveis de repetição
+
+- **Replanejamento Dinâmico**
+  - Adapta o fluxo de trabalho com base nos resultados
+  - Toma decisões baseadas em confiança
+  - Preserva o contexto entre tentativas
+
+### Variáveis de Ambiente
+
+| Variável | Padrão | Descrição |
+|----------|--------|-----------|
+| `GTA_WORKFLOW_MAX_RETRIES` | 3 | Número máximo de tentativas por tarefa |
+| `GTA_WORKFLOW_CONFIDENCE_THRESHOLD` | 0.8 | Limiar de confiança para aceitar resultados |
+| `GTA_CODE_VALIDATION_ENABLED` | true | Habilita validação de código |
+| `GTA_CODE_VALIDATION_STRICT` | false | Se verdadeiro, falha em erros de validação |
+| `GTA_CODE_AUTO_CORRECTION` | true | Tenta corrigir automaticamente erros de código |
+| `GTA_RETRY_LEARNING_ENABLED` | true | Aprende com tentativas anteriores |
+| `GTA_RETRY_CONTEXT_ENHANCEMENT` | true | Melhora o contexto em novas tentativas |
+
+### Documentação Detalhada
+
+Consulte os guias detalhados para obter mais informações:
+
+- [Guia de Uso](./docs/USAGE_GUIDE.md) - Exemplos práticos e instruções
+- [Sistema de Workflow Híbrido](./docs/HYBRID_WORKFLOW_SYSTEM.md) - Documentação técnica detalhada
+- [Provedores LLM](./docs/LLM_PROVIDERS.md) - Configuração e suporte a múltiplos modelos
 
 ### Modos de Raciocínio
 
