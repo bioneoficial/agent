@@ -1,6 +1,33 @@
-# Configuração de Provedores LLM
+# Documentação do GTA - Índice
 
-O Git Terminal Assistant (GTA) agora suporta múltiplos provedores de LLM, permitindo escolher entre modelos locais (Ollama) ou APIs comerciais (OpenAI, Anthropic, Google, Cohere, Azure).
+## 📚 Documentação Completa
+
+### 📖 Documentos Principais
+- [`README.md`](../README.md) - Visão geral e instalação do sistema
+- [`HYBRID_WORKFLOW_SYSTEM.md`](./HYBRID_WORKFLOW_SYSTEM.md) - Documentação técnica do sistema híbrido 🆕
+- [`USAGE_GUIDE.md`](./USAGE_GUIDE.md) - Guia de uso das novas funcionalidades 🆕
+- [`LLM_PROVIDERS.md`](./LLM_PROVIDERS.md) - Configuração de provedores LLM
+
+### 🏗️ Arquitetura do Sistema
+O GTA utiliza uma arquitetura multi-agente híbrida com:
+- **Sistema de Workflow Inteligente** - Execução com retry e replanning automático
+- **Validação Automática de Código** - Correção em tempo real usando LLM
+- **Saída Estruturada** - Modelos Pydantic para consistência de dados
+- **Análise de Confiança** - Decisões baseadas em scores de confiança
+
+### 🆕 Funcionalidades Avançadas
+- Validação automática de sintaxe Python
+- Correção automática de erros via LLM
+- Sistema de retry inteligente com aprendizado
+- Feedback estruturado de erros
+- Replanning dinâmico baseado em contexto
+- Metadados detalhados de execução
+
+---
+
+# Guia de Provedores LLM para o GTA
+
+Este documento detalha como configurar e utilizar diferentes provedores LLM com o Git Terminal Assistant (GTA). agora suporta múltiplos provedores de LLM, permitindo escolher entre modelos locais (Ollama) ou APIs comerciais (OpenAI, Anthropic, Google, Cohere, Azure).
 
 ## Provedores Suportados
 
