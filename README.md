@@ -59,11 +59,17 @@ O sistema utiliza uma arquitetura de agentes especializados, otimizada para efic
 - Formata automaticamente mensagens seguindo padrões de commits convencionais
 - Gerencia branches e operações de repositório remoto
 
-### 2. **CodeAgent** - Especialista em Código (Consolidado)
+### 2. **CodeAgent** - Especialista em Código (Consolidado + IA Avançada)
 - **Operações de Arquivo**
   - Criação, edição e leitura de arquivos
   - Suporte a múltiplas linguagens de programação
   - Backup automático de arquivos durante edições
+  
+- **Validação Automática de Código** 🆕
+  - Validação automática de sintaxe Python em tempo real
+  - Verificação de imports e dependências
+  - Correção automática de erros usando LLM
+  - Integração transparente no fluxo de geração de código
   
 - **Testes**
   - Execução de testes unitários e de integração
@@ -113,6 +119,43 @@ Os traces de raciocínio são salvos em `.orchestra/runs/` com:
 - Logs detalhados por etapa
 - Contexto e decisões tomadas
 - Métricas de performance
+
+## Sistema Híbrido de Workflow com IA Avançada
+
+O GTA agora inclui um sistema híbrido de workflow que combina a simplicidade do LangGraph com capacidades avançadas de planejamento dinâmico, validação automática e recuperação inteligente de erros.
+
+### Funcionalidades do Sistema Híbrido
+
+- **Planejamento Dinâmico**: Replanning automático baseado em resultados de execução
+- **Retry Inteligente**: Sistema de retry que aprende com falhas anteriores
+- **Validação Automática**: Validação de código em tempo real com correção automática
+- **Saída Estruturada**: Modelos Pydantic para garantir consistência de dados
+- **Análise de Confiança**: Decisões baseadas em scores de confiança
+- **Feedback de Erro**: Categorização inteligente de erros com sugestões de correção
+
+### Modelos de Dados Estruturados
+
+O sistema utiliza modelos Pydantic robustos para estruturar todos os dados:
+
+- `TaskResult` - Resultados estruturados de execução de tarefas
+- `ValidationResult` - Feedback detalhado de validação
+- `ErrorFeedback` - Análise categorizada de erros
+- `ReplanDecision` - Decisões inteligentes de replanning
+- `WorkflowResult` - Resultados de workflow completo
+- `TaskMetadata` - Metadados de execução
+
+### Retry Inteligente
+
+O sistema de retry analisa falhas anteriores e ajusta a abordagem:
+
+```python
+# Exemplo de retry com contexto aprimorado
+if "syntax" in error_message:
+    context["auto_correct"] = True
+    context["validation_strict"] = True
+elif "import" in error_message:
+    context["check_dependencies"] = True
+```
 
 ## Sistema de Percepção Proativa
 
@@ -345,13 +388,22 @@ clear
 - `agents` - Lista agentes e suas capacidades
 - `exit` - Sai do assistente
 
-## Vantagens da Arquitetura Multi-Agente
+## Vantagens da Arquitetura Multi-Agente Híbrida
 
+### Core Benefits
 1. **Especialização**: Cada agente é otimizado para sua tarefa
 2. **Manutenibilidade**: Código modular e fácil de debugar
 3. **Extensibilidade**: Novos agentes podem ser adicionados facilmente
 4. **Confiabilidade**: Sanitização automática de respostas do LLM
 5. **Performance**: Apenas o agente necessário é ativado
+
+### Benefícios do Sistema Híbrido 🆕
+6. **Auto-Correção**: Validação e correção automática de código
+7. **Resiliência**: Retry inteligente com análise de falhas
+8. **Observabilidade**: Saída estruturada com metadados detalhados
+9. **Adaptabilidade**: Replanning dinâmico baseado em contexto
+10. **Confiança**: Decisões baseadas em scores de confiança
+11. **Rastreabilidade**: Histórico completo de execução e decisões
 
 ## Requisitos
 
@@ -377,20 +429,28 @@ Para adicionar um novo agente:
 tcc/
 ├── agents/
 │   ├── __init__.py
-│   ├── base_agent.py      # Classe base com sanitização
-│   ├── git_agent.py       # Operações Git
-│   ├── code_agent.py      # Criação/edição de código
-│   └── orchestrator.py    # Roteador de requisições
-├── main.py                # Entry point
-├── llm_backend.py         # Configuração do LLM
-├── llm_providers.py       # Fábrica de provedores LLM
-├── install.sh             # Instalador (macOS/Linux)
-├── gta                    # Script global (macOS/Linux)
-├── gta.ps1                # Script PowerShell (Windows)
-├── gta.cmd                # Script cmd.exe (Windows)
+│   ├── base_agent.py        # Classe base com sanitização
+│   ├── git_agent.py         # Operações Git
+│   ├── code_agent.py        # Criação/edição/validação de código
+│   ├── workflow_executor.py # Sistema híbrido de workflow 🆕
+│   └── orchestrator.py      # Roteador de requisições
+├── orchestra/
+│   ├── schemas/
+│   │   ├── __init__.py
+│   │   ├── reasoning.py     # Esquemas de raciocínio CoT
+│   │   └── task_results.py  # Modelos Pydantic estruturados 🆕
+│   ├── perception/          # Sistema de percepção
+│   └── utils/               # Utilitários do sistema
+├── main.py                  # Entry point
+├── llm_backend.py           # Configuração do LLM
+├── llm_providers.py         # Fábrica de provedores LLM
+├── install.sh               # Instalador (macOS/Linux)
+├── gta                      # Script global (macOS/Linux)
+├── gta.ps1                  # Script PowerShell (Windows)
+├── gta.cmd                  # Script cmd.exe (Windows)
 ├── docs/
-│   └── LLM_PROVIDERS.md   # Guia de provedores LLM e exemplos
-└── README.md              # Este arquivo
+│   └── LLM_PROVIDERS.md     # Guia de provedores LLM e exemplos
+└── README.md                # Este arquivo
 ```
 
 ## Troubleshooting
