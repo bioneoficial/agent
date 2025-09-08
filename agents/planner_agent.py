@@ -540,7 +540,7 @@ Answer only: "PLANNING" or "DIRECT"
                 id=step.id,
                 task_type=self._map_action_to_task_type(step.action),
                 agent_type=self._infer_agent_type(step.action),
-                description=step.details or f"Execute {step.action.value}",
+                description=step.details or f"Execute {step.action.value if hasattr(step.action, 'value') else step.action}",
                 dependencies=dependencies,
                 estimated_time=step.estimated_duration,
                 postconditions=step.postconditions or [],
