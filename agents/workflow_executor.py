@@ -169,14 +169,21 @@ class WorkflowExecutor:
         workflow.add_edge("replan", "execute_task")
         # Conditional edge from completion check
         def should_end_workflow(state):
-            # Check multiple termination conditions
-            if hasattr(state, 'workflow_complete') and state.workflow_complete:
+            # Check multiple termination conditions with extra safety
+            try:
+                if hasattr(state, 'workflow_complete') and state.workflow_complete:
+                    print("🏁 Workflow complete flag set - terminating")
+                    return "end"
+                if state.current_task_index >= len(state.plan.subtasks):
+                    print(f"🏁 All tasks completed - terminating (index {state.current_task_index} >= {len(state.plan.subtasks)})")
+                    return "end"
+                if state.current_task_index >= 9:  # Hard safety limit
+                    print(f"🏁 Safety limit reached - terminating (index {state.current_task_index})")
+                    return "end"
+                return "continue"
+            except Exception as e:
+                print(f"🏁 Error in completion check - forcing termination: {e}")
                 return "end"
-            if state.current_task_index >= len(state.plan.subtasks):
-                return "end"
-            if state.current_task_index >= 9:  # Hard safety limit
-                return "end"
-            return "continue"
             
         workflow.add_conditional_edges(
             "check_completion",
@@ -187,12 +194,17 @@ class WorkflowExecutor:
             }
         )
         
-        return workflow.compile(checkpointer=None, debug=False)  # Disable checkpointing and debug to prevent recursion issues
+        return workflow.compile(checkpointer=None, debug=False).with_config({"recursion_limit": 50})  # Increase recursion limit to 50
     
     # Hybrid Workflow Functions
     
     def _execute_task_hybrid(self, state: HybridWorkflowState) -> HybridWorkflowState:
         """Enhanced task execution with structured results."""
+        # Check if we're beyond the available tasks
+        if state.current_task_index >= len(state.plan.subtasks):
+            print(f"🏁 Todas as tarefas foram completadas - índice {state.current_task_index} >= {len(state.plan.subtasks)}")
+            return {"workflow_complete": True}
+            
         current_task = state.plan.subtasks[state.current_task_index]
         
         print(f"🔄 Executando tarefa {current_task.id}: Execute {current_task.task_type.value}")
@@ -326,6 +338,11 @@ class WorkflowExecutor:
     
     def _evaluate_result(self, state: HybridWorkflowState) -> HybridWorkflowState:
         """Evaluate the result of the current task execution."""
+        # Check if we're beyond the available tasks
+        if state.current_task_index >= len(state.plan.subtasks):
+            print(f"🏁 Avaliação finalizada - índice {state.current_task_index} >= {len(state.plan.subtasks)}")
+            return {"workflow_complete": True}
+            
         current_task = state.plan.subtasks[state.current_task_index]
         result = state.task_results.get(current_task.id)
         
@@ -350,6 +367,11 @@ class WorkflowExecutor:
     
     def _should_replan(self, state: HybridWorkflowState) -> str:
         """Decide whether to replan, continue, or retry based on current state."""
+        # Check if we're beyond the available tasks
+        if state.current_task_index >= len(state.plan.subtasks):
+            print(f"🏁 Replanning finalizado - índice {state.current_task_index} >= {len(state.plan.subtasks)}")
+            return "continue"  # Signal to continue to completion check
+            
         current_task = state.plan.subtasks[state.current_task_index]
         result = state.task_results.get(current_task.id)
         
@@ -512,7 +534,12 @@ class WorkflowExecutor:
             state["should_continue"] = False
             return state
             
-        # Get current task
+        # Get current task - check bounds first
+        if current_index >= len(plan.subtasks):
+            print(f"🏁 Execução finalizada - índice {current_index} >= {len(plan.subtasks)}")
+            state["completed"] = True
+            return state
+            
         current_task = plan.subtasks[current_index]
         
         # Check if dependencies are met
