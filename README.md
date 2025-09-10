@@ -1,4 +1,4 @@
-# OrchestraAI (GTA)
+# OrchestraAI(GTA)
 
 GTA é um assistente inteligente de terminal que utiliza uma arquitetura multi-agente para executar operações Git e criar/editar arquivos de código entre outras funções auxiliando o engenheiro de software. O sistema é focado em desenvolvimento de software.
 
@@ -7,48 +7,6 @@ GTA é um assistente inteligente de terminal que utiliza uma arquitetura multi-a
 O sistema utiliza uma arquitetura de agentes especializados com um poderoso sistema de workflow híbrido que combina execução direta com planejamento dinâmico. A arquitetura foi projetada para ser robusta, flexível e auto-corretiva.
 
 ### Visão Geral do Sistema
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Hybrid Workflow System                        │
-│                                                                 │
-│  ┌─────────────┐    ┌───────────────────────────────────────┐   │
-│  │  Git Agent  │    │            Code Agent                 │   │
-│  │             │    │                                       │   │
-│  │ • Git cmds  │    │ • File operations (create/edit/read)  │   │
-│  │ • Commit    │    │ • Test execution & generation         │   │
-│  │ • Status    │    │ • Code analysis & refactoring         │   │
-│  └─────────────┘    │ • Project structure management        │   │
-│         │           └───────────────────────────────────────┘   │
-│         │                                                      │
-│         │           ┌──────────────────┐                       │
-│         └───────────┤   Chat Agent     │                       │
-│                     │                  │                       │
-│                     │ • General Q&A    │                       │
-│                     │ • Documentation  │                       │
-│                     └──────────────────┘                       │
-│                             │                                 │
-│                    ┌────────┴────────┐                        │
-│                    │   Orchestrator   │                        │
-│                    │                  │                        │
-│                    │ • Route requests │                        │
-│                    │ • Handle errors  │                        │
-│                    └────────┬────────┘                        │
-│                             │                                 │
-│  ┌───────────────────────────────────────────────────────┐    │
-│  │              Workflow Execution Engine                │    │
-│  │                                                       │    │
-│  │  ┌─────────────┐  ┌─────────────┐  ┌───────────────┐  │    │
-│  │  │  Task       │  │  Validation │  │  Retry &     │  │    │
-│  │  │  Execution  │◄─┤  & Error    │◄─┤  Replanning  │  │    │
-│  │  └─────────────┘  │  Handling   │  │  System      │  │    │
-│  │         ▲         └─────────────┘  └───────┬───────┘  │    │
-│  │         │                    ▲              │          │    │
-│  │         └────────────────────┴──────────────┘          │    │
-│  └───────────────────────────────────────────────────────┘    │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
 
 ### Componentes Principais
 
@@ -75,7 +33,7 @@ O sistema utiliza uma arquitetura de agentes especializados com um poderoso sist
    - Mensagens de commit semânticas
    - Gerenciamento de branches e repositórios
 
-2. **CodeAgent** (Consolidado)
+2. **CodeAgent**
    - Operações de arquivo (criar/editar/ler)
    - Execução e geração de testes
    - Análise e refatoração de código
@@ -96,7 +54,7 @@ O sistema utiliza uma arquitetura de agentes especializados com um poderoso sist
 - Formata automaticamente mensagens seguindo padrões de commits convencionais
 - Gerencia branches e operações de repositório remoto
 
-### 2. **CodeAgent** - Especialista em Código (Consolidado + IA Avançada)
+### 2. **CodeAgent** - Especialista em Código
 - **Operações de Arquivo**
   - Criação, edição e leitura de arquivos
   - Suporte a múltiplas linguagens de programação
@@ -200,7 +158,7 @@ Os traces de raciocínio são salvos em `.orchestra/runs/` com:
 
 ## Sistema Híbrido de Workflow com IA Avançada
 
-O GTA agora inclui um sistema híbrido de workflow que combina a simplicidade do LangGraph com capacidades avançadas de planejamento dinâmico, validação automática e recuperação inteligente de erros.
+O GTA inclui um sistema híbrido de workflow que combina a simplicidade do LangGraph com capacidades avançadas de planejamento dinâmico, validação automática e recuperação inteligente de erros.
 
 ### Funcionalidades do Sistema Híbrido
 
