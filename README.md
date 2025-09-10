@@ -1,6 +1,6 @@
-# Git Terminal Assistant (GTA) - TCC
+# OrchestraAI (GTA)
 
-GTA é um assistente inteligente de terminal que utiliza uma arquitetura multi-agente para executar operações Git e criar/editar arquivos de código. O sistema é focado especialmente em gerar mensagens de commit semânticas seguindo o padrão Conventional Commits.
+GTA é um assistente inteligente de terminal que utiliza uma arquitetura multi-agente para executar operações Git e criar/editar arquivos de código entre outras funções auxiliando o engenheiro de software. O sistema é focado em desenvolvimento de software.
 
 ## Arquitetura
 
